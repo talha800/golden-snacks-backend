@@ -60,8 +60,7 @@ async def send_whatsapp_flow(recipient_phone: str):
                     "flow_token": "goldensnacks_session_001",
                     "flow_id": FLOW_ID,
                     "flow_cta": "View Food Menu",
-                    "flow_action": "navigate",
-                    "flow_mode": "draft"  # This explicit flag authorizes the sandbox delivery
+                    "flow_action": "navigate"
                 }
             }
         }
