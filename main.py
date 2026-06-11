@@ -10,7 +10,7 @@ app = FastAPI(title="Golden Snacks BBQ WhatsApp Engine")
 VERIFY_TOKEN = "GoldenSnacksSecureToken2026"
 
 # 🔴 CRITICAL: Insert your Meta credentials here from your dashboard
-ACCESS_TOKEN = "EAAcuJlexuR4BRpGonBzWDvSXAZAp2onvVdprEaaqsGJp3eZBjJITGmelRlJWlT1FPyxtubciH2JlYcnkUkTo92mq0lLZCoJIYzrfOwoIEeb1MFGZAi4Mzp8EhJDN5QV059ZB3NQaoajS67cDCwoUQQhNldCyo26wO8LBxUpmA8BCeN0xW3ISU2unbLcUvjZAc5gV1uka4KohabHZCXl1DaeZBzryABbDJZAYtby4yd3u3dAo5T34xWvsqR0XeSIbEydTh5ZBE0d8YZA0COYPsn8yZBnLbgZDZD" # Your long permanent token
+ACCESS_TOKEN = "EAAcuJlexuR4BRiCTHMZCi7y73YyC3Q7JsgVAxw2WjfATKfeWQ3ixZCapITmdqAIdST8oi0FIvczbSh8osdvgJ4jzY9pDULeEAk8HCQzZBZBvBiXyFbBodwZAsgZAXi6ssFQ6YzEH4k9VrtVxO3oeHZBWbKFlWzB6r7iDaVjRmNe8Aw6TXN1adPMifyDPnfo9QZDZD" # Your long permanent token
 PHONE_NUMBER_ID = "1191114327413754" 
 FLOW_ID = "1324144613240759" 
 
