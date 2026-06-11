@@ -9,66 +9,66 @@ app = FastAPI(title="Golden Snacks BBQ WhatsApp Engine")
 
 VERIFY_TOKEN = "GoldenSnacksSecureToken2026"
 
-# 🔴 CRITICAL: Insert your Meta credentials here from your dashboard
-ACCESS_TOKEN = "EAAcuJlexuR4BRiCTHMZCi7y73YyC3Q7JsgVAxw2WjfATKfeWQ3ixZCapITmdqAIdST8oi0FIvczbSh8osdvgJ4jzY9pDULeEAk8HCQzZBZBvBiXyFbBodwZAsgZAXi6ssFQ6YzEH4k9VrtVxO3oeHZBWbKFlWzB6r7iDaVjRmNe8Aw6TXN1adPMifyDPnfo9QZDZD" # Your long permanent token
-PHONE_NUMBER_ID = "1191114327413754" 
-FLOW_ID = "26769930609374582" 
+# 🟢 LIVE CONFIGURATION KEYS
+ACCESS_TOKEN = "YOUR_PERMANENT_ACCESS_TOKEN"
+PHONE_NUMBER_ID = "1191114327413754"
 
 @app.get("/")
 async def root_check():
-    return {"status": "active", "message": "Golden Snacks Engine is fully online!"}
+    return {"status": "active", "message": "Golden Snacks Engine is online!"}
 
 @app.get("/webhooks/whatsapp")
 async def webhook_verification(request: Request):
     params = request.query_params
     if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == VERIFY_TOKEN:
-        logger.info("🚀 SUCCESS: Meta Webhook handshake verified and linked!")
         return Response(content=params.get("hub.challenge"), media_type="text/plain")
     return Response(content="Verification failed", status_code=403)
 
-async def send_whatsapp_flow(recipient_phone: str):
-    """Constructs and fires an official Meta Interactive Flow object back to the user's phone."""
+async def send_interactive_menu(recipient_phone: str):
+    """Sends a native, premium WhatsApp Interactive List Message to select food categories."""
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
         "Content-Type": "application/json"
     }
     
-    # Payload architecture defining the interactive WhatsApp Flow button element
-    # Upgraded, clean payload structure conforming to strict API routing keys
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
         "to": recipient_phone,
         "type": "interactive",
         "interactive": {
-            "type": "flow",
+            "type": "list",
             "header": {
                 "type": "text",
-                "text": "Golden Snacks Kitchen"
+                "text": "Golden Snacks & BBQ 🍔"
             },
             "body": {
-                "text": "Tap the button below to view our interactive digitized menu layout!"
+                "text": "Welcome to our digital kitchen! Please tap the button below to browse our menu categories and start your order."
             },
             "footer": {
-                "text": "Powered by Mutamdost Backend Engine"
+                "text": "Select an option to view items"
             },
             "action": {
-                "name": "flow",
-                "parameters": {
-                    "flow_message_version": "3.0",
-                    "flow_token": "goldensnacks_session_001",
-                    "flow_id": FLOW_ID,
-                    "flow_cta": "View Food Menu",
-                    "flow_action": "navigate"
-                }
+                "button": "View Categories",
+                "sections": [
+                    {
+                        "title": "Main Food Menu",
+                        "rows": [
+                            {"id": "cat_biryani", "title": "Biryani Specials", "description": "Authentic chicken & mutton biryani"},
+                            {"id": "cat_pizza", "title": "Pizza Options", "description": "Freshly baked pan pizzas"},
+                            {"id": "cat_fastfood", "title": "Fast Food Favorites", "description": "Zinger burgers & club sandwiches"},
+                            {"id": "cat_bbq", "title": "BBQ Rolls", "description": "Chicken boti & beef seekh rolls"}
+                        ]
+                    }
+                ]
             }
         }
     }
     
     async with httpx.AsyncClient() as client:
         response = await client.post(url, json=payload, headers=headers)
-        logger.info(f"📤 Outbound Flow Status Code: {response.status_code} | Response: {response.text}")
+        logger.info(f"📤 List Message Status Code: {response.status_code} | Response: {response.text}")
         return response.json()
 
 @app.post("/webhooks/whatsapp")
@@ -77,35 +77,32 @@ async def handle_whatsapp_traffic(request: Request):
         payload = await request.json()
         logger.info(f"📥 RAW PAYLOAD RECEIVED: {payload}")
         
-        # 1. Handle user completions coming directly from the interactive Flow menu selection layout
-        if "action" in payload and payload.get("action") == "request_routing":
-            flow_data = payload.get("data", {})
-            logger.info(f"🍔 INTERACTIVE FLOW SELECTION CAPTURED! Form Submission: {flow_data}")
-            return {
-                "version": "3.0",
-                "screen": "CATEGORY_SELECTOR",
-                "data": {"extension_message_response": {"params": {"current_screen": "CATEGORY_SELECTOR", "status": "success"}}}
-            }
-        
-        # 2. Handle normal incoming chat messages from users
         if "entry" in payload and payload["entry"]:
             changes = payload["entry"][0].get("changes", [])
             if changes and "value" in changes[0]:
                 value = changes[0]["value"]
+                
+                # 1. Capture interactive dropdown selection from the user's phone
                 if "messages" in value and value["messages"]:
                     msg_obj = value["messages"][0]
                     sender_phone = msg_obj.get("from")
                     
+                    if msg_obj.get("type") == "interactive":
+                        interactive_obj = msg_obj.get("interactive", {})
+                        if interactive_obj.get("type") == "list_reply":
+                            selection_id = interactive_obj.get("list_reply", {}).get("id")
+                            logger.info(f"🍔 SUCCESS! User selected menu category ID: {selection_id}")
+                            # Here is where we will hook up Supabase to pull items matching this ID!
+                            return {"status": "processed"}
+                    
+                    # 2. Capture normal text message "menu" trigger
                     if "text" in msg_obj and msg_obj["text"]:
                         user_text = msg_obj["text"].get("body", "").strip().lower()
-                        logger.info(f"💬 Normal Chat Message Recognized from {sender_phone}: '{user_text}'")
-                        
-                        # Trigger the outward Flow object transmission if user says "menu"
                         if user_text == "menu":
-                            logger.info(f"⚡ Trimming flow deployment command routing for {sender_phone}...")
-                            await send_whatsapp_flow(sender_phone)
+                            logger.info(f"⚡ Sending active menu list layout to {sender_phone}...")
+                            await send_interactive_menu(sender_phone)
                             
         return {"status": "processed"}
     except Exception as e:
-        logger.error(f"💥 CRITICAL ERROR: {str(e)}")
+        logger.error(f"💥 ERROR: {str(e)}")
         return {"status": "error"}
