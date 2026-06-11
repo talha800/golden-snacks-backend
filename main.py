@@ -35,6 +35,7 @@ async def send_whatsapp_flow(recipient_phone: str):
     }
     
     # Payload architecture defining the interactive WhatsApp Flow button element
+    # Upgraded, clean payload structure conforming to strict API routing keys
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
@@ -60,9 +61,7 @@ async def send_whatsapp_flow(recipient_phone: str):
                     "flow_id": FLOW_ID,
                     "flow_cta": "View Food Menu",
                     "flow_action": "navigate",
-                    "flow_context": {
-                        "flow_screen": "CATEGORY_SELECTOR"
-                    }
+                    "flow_mode": "draft"  # This explicit flag authorizes the sandbox delivery
                 }
             }
         }
