@@ -1,56 +1,64 @@
-from fastapi import FastAPI, Request, Response, status
+from fastapi import FastAPI, Request, Response
 import logging
-import json
 
-# Setup clear, beautiful terminal logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
+# Configure Clean Console Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] GoldenSnacksEngine: %(message)s")
 logger = logging.getLogger("GoldenSnacksEngine")
 
-app = FastAPI(title="Golden Snacks & BBQ - Core Webhook Engine")
+app = FastAPI(title="Golden Snacks BBQ WhatsApp Engine")
 
-# This is our custom security handshake password
-MY_SECRET_VERIFY_TOKEN = "GoldenSnacksSecureToken2026"
+# Secret Verification Token
+VERIFY_TOKEN = "GoldenSnacksSecureToken2026"
 
 @app.get("/")
 async def root_check():
     return {"status": "active", "message": "Golden Snacks Engine is fully online!"}
 
 @app.get("/webhooks/whatsapp")
-async def verify_meta_handshake(request: Request):
-    """
-    Meta hits this GET endpoint to verify your server is real.
-    """
+async def webhook_verification(request: Request):
+    """Handles the secure handshake verification with Meta Developer Portal."""
     params = request.query_params
     mode = params.get("hub.mode")
     token = params.get("hub.verify_token")
     challenge = params.get("hub.challenge")
     
-    if mode == "subscribe" and token == MY_SECRET_VERIFY_TOKEN:
+    if mode == "subscribe" and token == VERIFY_TOKEN:
         logger.info("🚀 SUCCESS: Meta Webhook handshake verified and linked!")
         return Response(content=challenge, media_type="text/plain")
-        
-    logger.error("❌ ERROR: Handshake failed. The verification tokens do not match.")
-    return Response(content="Verification Failed", status_code=status.HTTP_403_FORBIDDEN)
-
+    
+    logger.warning("❌ ERROR: Handshake failed. Invalid verify token provided.")
+    return Response(content="Verification failed", status_code=403)
 
 @app.post("/webhooks/whatsapp")
-async def ingest_whatsapp_traffic(request: Request):
-    """
-    Ingests all incoming live text messages and layout data packets from your phone.
-    """
+async def handle_whatsapp_traffic(request: Request):
+    """Processes incoming live chat messages and interactive WhatsApp Flow forms."""
     try:
         payload = await request.json()
-        logger.info(f"📥 RAW PAYLOAD RECEIVED: {json.dumps(payload, indent=2)}")
+        logger.info(f"📥 RAW PAYLOAD RECEIVED: {payload}")
         
-        # Guard layer against empty system test pings from Meta
-        if "entry" not in payload:
-            return {"status": "ignored", "reason": "System verification ping"}
+        # Check if the data block contains an interactive WhatsApp Flow submission
+        if "action" in payload and payload.get("action") == "request_routing":
+            flow_data = payload.get("data", {})
+            logger.info(f"🍔 INTERACTIVE FLOW RECEIVED! User chose category: {flow_data}")
             
-        return {"status": "success"}
-        
+            # Respond to Meta with a mandatory layout success acknowledgment wrapper
+            response_payload = {
+                "version": "3.0",
+                "screen": "CATEGORY_SELECTOR",
+                "data": {
+                    "extension_message_response": {
+                        "params": {
+                            "current_screen": "CATEGORY_SELECTOR",
+                            "status": "success"
+                        }
+                    }
+                }
+            }
+            return response_payload
+
+        # Keep handling fallback text messages safely
+        return {"status": "processed", "message": "Standard payload handled successfully"}
+
     except Exception as e:
-        logger.error(f"💥 CRITICAL API FAILURE: {str(e)}")
-        return Response(content="Internal Server Error", status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        logger.error(f"💥 CRITICAL PROCESSING ERROR: {str(e)}")
+        return {"status": "error", "message": "Internal processing exception"}
