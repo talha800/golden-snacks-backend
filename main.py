@@ -12,7 +12,7 @@ VERIFY_TOKEN = "GoldenSnacksSecureToken2026"
 # 🔴 CRITICAL: Insert your Meta credentials here from your dashboard
 ACCESS_TOKEN = "EAAcuJlexuR4BRiCTHMZCi7y73YyC3Q7JsgVAxw2WjfATKfeWQ3ixZCapITmdqAIdST8oi0FIvczbSh8osdvgJ4jzY9pDULeEAk8HCQzZBZBvBiXyFbBodwZAsgZAXi6ssFQ6YzEH4k9VrtVxO3oeHZBWbKFlWzB6r7iDaVjRmNe8Aw6TXN1adPMifyDPnfo9QZDZD" # Your long permanent token
 PHONE_NUMBER_ID = "1191114327413754" 
-FLOW_ID = "1324144613240759" 
+FLOW_ID = "26769930609374582" 
 
 @app.get("/")
 async def root_check():
