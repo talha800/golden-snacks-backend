@@ -14,6 +14,10 @@ app = FastAPI(title="Golden Snacks & BBQ - Core Webhook Engine")
 # This is our custom security handshake password
 MY_SECRET_VERIFY_TOKEN = "GoldenSnacksSecureToken2026"
 
+@app.get("/")
+async def root_check():
+    return {"status": "active", "message": "Golden Snacks Engine is fully online!"}
+
 @app.get("/webhooks/whatsapp")
 async def verify_meta_handshake(request: Request):
     """
