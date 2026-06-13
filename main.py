@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import HTMLResponse
 import logging
 import httpx
 
@@ -16,6 +17,25 @@ PHONE_NUMBER_ID = "1191114327413754"
 @app.get("/")
 async def root_check():
     return {"status": "active", "message": "Golden Snacks Engine is online!"}
+
+@app.get("/privacy", response_class=HTMLResponse)
+async def privacy_policy_page():
+    return """
+    <html>
+        <head><title>Privacy Policy - Golden Snacks & BBQ</title></head>
+        <body style="font-family: Arial, sans-serif; padding: 40px; line-height: 1.6;">
+            <h2>Privacy Policy for Golden Snacks & BBQ Bot</h2>
+            <p><strong>Last Updated: June 13, 2026</strong></p>
+            <p>Your privacy is important to us. This privacy policy explains how our automated chat platform handles metadata and user selections:</p>
+            <ul>
+                <li><strong>Data Collection:</strong> We only process inbound WhatsApp messages containing text keywords (e.g., 'menu') and interactive tap choices to fulfill your food selections.</li>
+                <li><strong>Data Usage:</strong> Captured ordering choices are processed solely to communicate with restaurant terminals and database logging engines.</li>
+                <li><strong>Data Protection:</strong> We do not distribute customer contact identifiers or metadata to third-party marketing services.</li>
+            </ul>
+            <p>If you have questions about our digital kitchen routing logic, please contact us at dataconsultant@haniyagn.com.</p>
+        </body>
+    </html>
+    """
 
 @app.get("/webhooks/whatsapp")
 async def webhook_verification(request: Request):
