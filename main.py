@@ -6,13 +6,14 @@ import httpx
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] GoldenSnacksEngine: %(message)s")
 logger = logging.getLogger("GoldenSnacksEngine")
 
-app = FastAPI(title="Golden Snacks BBQ WhatsApp Engine")
+app = FastAPI(title="Golden Snacks BBQ Production Engine")
 
 VERIFY_TOKEN = "GoldenSnacksSecureToken2026"
 
-# 🟢 LIVE CONFIGURATION KEYS
-ACCESS_TOKEN = "EAAcuJlexuR4BRiCTHMZCi7y73YyC3Q7JsgVAxw2WjfATKfeWQ3ixZCapITmdqAIdST8oi0FIvczbSh8osdvgJ4jzY9pDULeEAk8HCQzZBZBvBiXyFbBodwZAsgZAXi6ssFQ6YzEH4k9VrtVxO3oeHZBWbKFlWzB6r7iDaVjRmNe8Aw6TXN1adPMifyDPnfo9QZDZD"
+# 🟢 TRUE PRODUCTION IDENTIFIERS
+ACCESS_TOKEN = "YOUR_PERMANENT_ACCESS_TOKEN"
 PHONE_NUMBER_ID = "1191114327413754"
+FLOW_ID = "26769930609374582"
 
 @app.get("/")
 async def root_check():
@@ -20,19 +21,14 @@ async def root_check():
 
 @app.get("/privacy", response_class=HTMLResponse)
 async def privacy_policy_page():
+    """Keeps Meta's crawler happy by serving a valid HTML page."""
     return """
     <html>
         <head><title>Privacy Policy - Golden Snacks & BBQ</title></head>
         <body style="font-family: Arial, sans-serif; padding: 40px; line-height: 1.6;">
             <h2>Privacy Policy for Golden Snacks & BBQ Bot</h2>
             <p><strong>Last Updated: June 13, 2026</strong></p>
-            <p>Your privacy is important to us. This privacy policy explains how our automated chat platform handles metadata and user selections:</p>
-            <ul>
-                <li><strong>Data Collection:</strong> We only process inbound WhatsApp messages containing text keywords (e.g., 'menu') and interactive tap choices to fulfill your food selections.</li>
-                <li><strong>Data Usage:</strong> Captured ordering choices are processed solely to communicate with restaurant terminals and database logging engines.</li>
-                <li><strong>Data Protection:</strong> We do not distribute customer contact identifiers or metadata to third-party marketing services.</li>
-            </ul>
-            <p>If you have questions about our digital kitchen routing logic, please contact us at dataconsultant@haniyagn.com.</p>
+            <p>We process selections solely to communicate with restaurant terminals and database logging engines.</p>
         </body>
     </html>
     """
@@ -44,8 +40,8 @@ async def webhook_verification(request: Request):
         return Response(content=params.get("hub.challenge"), media_type="text/plain")
     return Response(content="Verification failed", status_code=403)
 
-async def send_interactive_menu(recipient_phone: str):
-    """Sends a native, premium WhatsApp Interactive List Message to select food categories."""
+async def send_whatsapp_flow(recipient_phone: str):
+    """Sends the official dynamic WhatsApp Flow layout menu card."""
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
@@ -58,37 +54,38 @@ async def send_interactive_menu(recipient_phone: str):
         "to": recipient_phone,
         "type": "interactive",
         "interactive": {
-            "type": "list",
+            "type": "flow",
             "header": {
                 "type": "text",
                 "text": "Golden Snacks & BBQ 🍔"
             },
             "body": {
-                "text": "Welcome to our digital kitchen! Please tap the button below to browse our menu categories and start your order."
+                "text": "Welcome to our digital kitchen! Tap the button below to browse categories, select items, and place your order directly."
             },
             "footer": {
-                "text": "Select an option to view items"
+                "text": "Powered by Haniya Global Network"
             },
             "action": {
-                "button": "View Categories",
-                "sections": [
-                    {
-                        "title": "Main Food Menu",
-                        "rows": [
-                            {"id": "cat_biryani", "title": "Biryani Specials", "description": "Authentic chicken & mutton biryani"},
-                            {"id": "cat_pizza", "title": "Pizza Options", "description": "Freshly baked pan pizzas"},
-                            {"id": "cat_fastfood", "title": "Fast Food Favorites", "description": "Zinger burgers & club sandwiches"},
-                            {"id": "cat_bbq", "title": "BBQ Rolls", "description": "Chicken boti & beef seekh rolls"}
-                        ]
+                "name": "flow",
+                "parameters": {
+                    "flow_message_version": "3",
+                    "flow_token": "token_snacks_001",
+                    "flow_id": FLOW_ID,
+                    "flow_cta": "View Food Menu",
+                    "action": "navigate",
+                    "flow_action_handler_version": "yes",
+                    "flow_input_data": {
+                        "initial_screen": "CATEGORY_SELECTOR",
+                        "data": {}
                     }
-                ]
+                }
             }
         }
     }
     
     async with httpx.AsyncClient() as client:
         response = await client.post(url, json=payload, headers=headers)
-        logger.info(f"📤 List Message Status Code: {response.status_code} | Response: {response.text}")
+        logger.info(f"📤 Flow Send Status Code: {response.status_code} | Response: {response.text}")
         return response.json()
 
 @app.post("/webhooks/whatsapp")
@@ -102,27 +99,23 @@ async def handle_whatsapp_traffic(request: Request):
             if changes and "value" in changes[0]:
                 value = changes[0]["value"]
                 
-                # 1. Capture interactive dropdown selection from the user's phone
+                # 1. Capture text triggers from customer devices
                 if "messages" in value and value["messages"]:
                     msg_obj = value["messages"][0]
                     sender_phone = msg_obj.get("from")
                     
-                    if msg_obj.get("type") == "interactive":
-                        interactive_obj = msg_obj.get("interactive", {})
-                        if interactive_obj.get("type") == "list_reply":
-                            selection_id = interactive_obj.get("list_reply", {}).get("id")
-                            logger.info(f"🍔 SUCCESS! User selected menu category ID: {selection_id}")
-                            # Here is where we will hook up Supabase to pull items matching this ID!
-                            return {"status": "processed"}
-                    
-                    # 2. Capture normal text message "menu" trigger
-                    if "text" in msg_obj and msg_obj["text"]:
+                    if msg_obj.get("type") == "text":
                         user_text = msg_obj["text"].get("body", "").strip().lower()
                         if user_text == "menu":
-                            logger.info(f"⚡ Sending active menu list layout to {sender_phone}...")
-                            await send_interactive_menu(sender_phone)
+                            logger.info(f"⚡ Dispatching interactive menu Flow directly to {sender_phone}...")
+                            await send_whatsapp_flow(sender_phone)
                             
+                # 2. Capture structural responses returned from the WhatsApp Flow UI
+                elif "flow_reply" in value:
+                    # Form data payload submissions will be processed here
+                    logger.info("📥 Flow form submitted successfully by user!")
+                    
         return {"status": "processed"}
     except Exception as e:
-        logger.error(f"💥 ERROR: {str(e)}")
+        logger.error(f"💥 WEBHOOK EXCEPTION: {str(e)}")
         return {"status": "error"}
