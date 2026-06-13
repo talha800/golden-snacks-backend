@@ -41,7 +41,7 @@ async def webhook_verification(request: Request):
     return Response(content="Verification failed", status_code=403)
 
 async def send_whatsapp_flow(recipient_phone: str):
-    """Sends the official dynamic WhatsApp Flow layout menu card with corrected payload nesting."""
+    """Sends the official dynamic WhatsApp Flow layout menu card with exact Meta production schema compliance."""
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
@@ -67,14 +67,14 @@ async def send_whatsapp_flow(recipient_phone: str):
             },
             "action": {
                 "name": "flow",
-                # 🟢 Meta's correct structural architecture puts these three keys side-by-side
-                "action": "navigate",
-                "flow_action_handler_version": "yes", 
                 "parameters": {
                     "flow_message_version": "3",
                     "flow_token": "token_snacks_001",
                     "flow_id": FLOW_ID,
                     "flow_cta": "View Food Menu",
+                    # 🟢 Meta's official schema places these routing commands strictly inside parameters
+                    "action": "navigate",
+                    "flow_action_handler_version": "yes", 
                     "flow_input_data": {
                         "initial_screen": "CATEGORY_SELECTOR",
                         "data": {}
