@@ -1,0 +1,19 @@
+# Local Virtual Environments (Render builds its own using requirements.txt)
+venv/
+.venv/
+env/
+
+# Python caching binaries
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Sensitive Configuration Matrix (Handled securely via Render Dashboard)
+.env
+.env.local
+
+# Operating System temporary files
+.DS_Store
+Thumbs.db
