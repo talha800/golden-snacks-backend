@@ -18,7 +18,7 @@ logger = logging.getLogger("GoldenSnacksEngine")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    version="2.3.0",
+    version="2.4.0",
     docs_url="/api/docs" if settings.ENV_MODE == "DEVELOPMENT" else None
 )
 
@@ -139,14 +139,11 @@ def clear_active_database_cart(db: Session, session_id: str):
     db.commit()
 
 async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Session):
-    """Leverages relational native SQL aggregates directly on your Supabase tables."""
-    checkout_query = text("""
-        SELECT p.name_en, p.portion_size, c.quantity, p.price, (c.quantity * p.price) as line_total
-        FROM cart_items c
-        JOIN products p ON c.sku_id = p.id
-        WHERE c.session_id = :session_id
-    """)
-    cart_rows = db.execute(checkout_query, {"session_id": session_id}).fetchall()
+    master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
+    menu_dict = {str(item["sku_id"]): item for item in master_menu}
+    
+    cart_query = text("SELECT sku_id, quantity FROM cart_items WHERE session_id = :session_id")
+    cart_rows = db.execute(cart_query, {"session_id": session_id}).fetchall()
     
     if not cart_rows:
         await send_whatsapp_text(recipient_phone, "🛒 Your cart is currently empty! Type *'menu'* to explore items.")
@@ -156,9 +153,15 @@ async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Sessi
     subtotal = 0.0
     
     for row in cart_rows:
-        name, portion, qty, price, total = row
-        card_lines.append(f"• *{name} ({portion})* x{qty} ➔ *{total:.2f} SAR*")
-        subtotal += float(total)
+        sku_str = str(row[0])
+        qty = row[1]
+        if sku_str in menu_dict:
+            item = menu_dict[sku_str]
+            desc = f"{item['name_en']} ({item['portion_size']})"
+            cost = float(item["price"])
+            line_total = qty * cost
+            card_lines.append(f"• *{desc}* x{qty} ➔ *{line_total:.2f} SAR*")
+            subtotal += line_total
 
     vat_amount = subtotal * 0.15
     grand_total = subtotal + vat_amount
@@ -169,7 +172,6 @@ async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Sessi
     card_lines.append(f"💰 *Total Paid:* *{grand_total:.2f} SAR*")
     card_lines.append("\nThank you for choosing Golden Snacks! Your order is printing inside our kitchen now. Type *'menu'* to start a new order selection card.")
     
-    # Flip session flag directly in database
     close_query = text("UPDATE whatsapp_sessions SET is_active = false WHERE id = :session_id")
     db.execute(close_query, {"session_id": session_id})
     db.commit()
@@ -233,16 +235,22 @@ async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: 
                 "action": {"button": "View Available Items", "sections": [{"title": "Freshly Prepared Today", "rows": rows[:10]}]}
             }
         }
-        url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
-        async with httpx.AsyncClient() as client:
-            await client.post(url, json=text_payload, headers=headers)
+    url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient() as client:
+        await client.post(url, json=text_payload, headers=headers)
 
 async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session):
-    """Queries the backend products snapshot view to fetch descriptive names natively."""
-    item_query = text("SELECT name_en, portion_size FROM products WHERE id = :sku_id LIMIT 1")
-    item_row = db.execute(item_query, {"sku_id": sku_id}).fetchone()
-    item_desc = f"{item_row[0]} ({item_row[1]})" if item_row else "Item"
+    """Natively references the verified database schema pipeline mapping layer to prevent table schema errors."""
+    master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
+    menu_dict = {str(item["sku_id"]): item for item in master_menu}
+    
+    sku_uuid_str = str(sku_id)
+    if sku_uuid_str in menu_dict:
+        item_data = menu_dict[sku_uuid_str]
+        item_desc = f"{item_data['name_en']} ({item_data['portion_size']})"
+    else:
+        item_desc = "Item"
 
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
     payload = {
@@ -262,37 +270,45 @@ async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session)
     }
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient() as client:
-        await client.post(url, json=payload, headers=headers) # 🧼 Typo resolved here completely
+        await client.post(url, json=payload, headers=headers)
 
 async def send_order_summary(recipient_phone: str, session_id: str, db: Session):
-    """Pulls aggregated item states directly using native relational joins inside Postgres."""
-    summary_query = text("""
-        SELECT p.name_en, p.portion_size, c.quantity, p.price, (c.quantity * p.price) as line_total
-        FROM cart_items c
-        JOIN products p ON c.sku_id = p.id
-        WHERE c.session_id = :session_id
-    """)
-    basket_rows = db.execute(summary_query, {"session_id": session_id}).fetchall()
+    cart_query = text("SELECT sku_id, quantity FROM cart_items WHERE session_id = :session_id")
+    cart_rows = db.execute(cart_query, {"session_id": session_id}).fetchall()
     
-    if not basket_rows:
+    if not cart_rows:
         message_text = "🛒 *Your shopping basket is currently empty!* Type *'menu'* to explore our kitchen categories."
     else:
+        master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
+        menu_dict = {str(item["sku_id"]): item for item in master_menu}
+        
         card_lines = ["🛒 *GOLDEN SNACKS ORDER SUMMARY*\n" + "─"*15]
         subtotal = 0.0
         
-        for row in basket_rows:
-            name, portion, qty, price, total = row
-            card_lines.append(f"• *{name} ({portion})*\n  `{qty} x {price:.2f} SAR` ➔ *{total:.2f} SAR*")
-            subtotal += float(total)
+        for row in cart_rows:
+            sku_uuid_str = str(row[0])
+            qty = row[1]
             
-        vat_amount = subtotal * 0.15
-        grand_total = subtotal + vat_amount
-        card_lines.append("─"*15)
-        card_lines.append(f"🧾 *Subtotal:* {subtotal:.2f} SAR")
-        card_lines.append(f"💵 *VAT (15%):* {vat_amount:.2f} SAR")
-        card_lines.append(f"💰 *Grand Total:* *{grand_total:.2f} SAR*")
-        card_lines.append("\nTo finalize this dispatch, type *'checkout'*, or type *'reset'* to clear all items.")
-        message_text = "\n".join(card_lines)
+            if sku_uuid_str in menu_dict:
+                item_data = menu_dict[sku_uuid_str]
+                name = f"{item_data['name_en']} ({item_data['portion_size']})"
+                price = float(item_data["price"])
+                total = qty * price
+                
+                card_lines.append(f"• *{name}*\n  `{qty} x {price:.2f} SAR` ➔ *{total:.2f} SAR*")
+                subtotal += total
+        
+        if subtotal == 0.0:
+            message_text = "🛒 *Your shopping basket is currently empty!* Type *'menu'* to explore our kitchen categories."
+        else:
+            vat_amount = subtotal * 0.15
+            grand_total = subtotal + vat_amount
+            card_lines.append("─"*15)
+            card_lines.append(f"🧾 *Subtotal:* {subtotal:.2f} SAR")
+            card_lines.append(f"💵 *VAT (15%):* {vat_amount:.2f} SAR")
+            card_lines.append(f"💰 *Grand Total:* *{grand_total:.2f} SAR*")
+            card_lines.append("\nTo finalize this dispatch, type *'checkout'*, or type *'reset'* to clear all items.")
+            message_text = "\n".join(card_lines)
 
     await send_whatsapp_text(recipient_phone, message_text)
 
