@@ -233,11 +233,11 @@ async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session)
         await client.post(url, json=payload, headers=headers)
 
 async def send_order_summary(recipient_phone: str, session_id: str, db: Session):
+    """Calculates active item aggregation rows using relational product snapshots."""
     summary_query = text("""
-        SELECT p.name_en, c.quantity, pr.price, (c.quantity * pr.price) as line_total
+        SELECT p.name_en, c.quantity, p.price, (c.quantity * p.price) as line_total
         FROM cart_items c
         JOIN products p ON c.sku_id = p.id
-        JOIN prices pr ON p.id = pr.sku_id
         WHERE c.session_id = :session_id
     """)
     basket_rows = db.execute(summary_query, {"session_id": session_id}).fetchall()
@@ -247,6 +247,7 @@ async def send_order_summary(recipient_phone: str, session_id: str, db: Session)
     else:
         card_lines = ["🛒 *GOLDEN SNACKS ORDER SUMMARY*\n" + "─"*15]
         subtotal = 0.0
+        
         for row in basket_rows:
             name, qty, price, total = row
             card_lines.append(f"• *{name}*\n  `{qty} x {price:.2f} SAR` ➔ *{total:.2f} SAR*")
@@ -254,6 +255,7 @@ async def send_order_summary(recipient_phone: str, session_id: str, db: Session)
             
         vat_amount = subtotal * 0.15
         grand_total = subtotal + vat_amount
+        
         card_lines.append("─"*15)
         card_lines.append(f"🧾 *Subtotal:* {subtotal:.2f} SAR")
         card_lines.append(f"💵 *VAT (15%):* {vat_amount:.2f} SAR")
