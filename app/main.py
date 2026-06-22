@@ -18,7 +18,7 @@ logger = logging.getLogger("GoldenSnacksEngine")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    version="2.1.2",
+    version="2.2.0",
     docs_url="/api/docs" if settings.ENV_MODE == "DEVELOPMENT" else None
 )
 
@@ -33,34 +33,15 @@ PHONE_NUMBER_ID = settings.WHATSAPP_PHONE_NUMBER_ID
 async def root_check():
     return {"status": "active", "message": "Golden Snacks Production Engine is online!"}
 
-@app.get("/health", status_code=status.HTTP_200_OK)
-def system_health_check():
-    return {"status": "healthy", "engine": "Mutam Dost Stateful Core Backend"}
-
 # =====================================================================
-# META WHATSAPP WEBHOOK ROUTING GATEWAY (VERIFICATION & TRAFFIC)
+# META WHATSAPP WEBHOOK ROUTING GATEWAY (STATEFUL ROUTER)
 # =====================================================================
-
-@app.get("/webhooks/whatsapp")
-@app.get("/webhook")
-async def whatsapp_webhook_verification(request: Request):
-    params = request.query_params
-    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == settings.WHATSAPP_VERIFY_TOKEN:
-        logger.info("🚀 [META WEBHOOK] Verification Challenge Passed Successfully!")
-        return Response(content=params.get("hub.challenge"), media_type="text/plain")
-    return Response(content="Verification failed", status_code=403)
-
 
 @app.post("/webhooks/whatsapp")
 @app.post("/webhook")
 async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db)):
-    """
-    Stateful Webhook Gateway: Tracks incoming customer phone numbers, provisions
-    persistent order sessions, and dynamically updates Supabase carts.
-    """
     try:
         payload = await request.json()
-        logger.info(f"📥 RAW PAYLOAD RECEIVED: {payload}")
         
         if "entry" in payload and payload["entry"]:
             entry_obj = payload["entry"][0]
@@ -74,21 +55,33 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                     if not sender_phone:
                         return {"status": "ignored"}
                         
+                    # Rule 1: Extract or provision only an UNPLACED open cart row context
                     session_id = ensure_active_cart_session(db, phone_number=sender_phone)
                     
-                    # MAPPING TRAFFIC ROUTE A: INBOUND TEXT TRIGGERS
+                    # TRAFFIC ROUTE A: INBOUND TEXT COMMAND ENGINE
                     if msg_obj.get("type") == "text":
                         user_text = msg_obj["text"].get("body", "").strip().lower()
                         
                         if user_text in ["menu", "hi", "hello", "bhai", "add more items"]:
                             await send_interactive_menu(sender_phone)
-                        elif user_text in ["checkout", "view cart", "summary"]:
+                            
+                        elif user_text in ["view cart", "summary", "cart"]:
                             await send_order_summary(sender_phone, session_id, db)
                             
-                    # MAPPING TRAFFIC ROUTE B: LIST SELECTIONS / INTERACTIVE BUTTONS
+                        elif user_text in ["reset", "start over", "clear"]:
+                            # 🔄 RESET TRIGGER ACTION
+                            clear_active_database_cart(db, session_id=session_id)
+                            await send_whatsapp_text(sender_phone, "🗑️ *Your cart has been completely reset!* Your old selections were deleted. Type *'menu'* to start a completely fresh order card.")
+                            
+                        elif user_text in ["checkout", "pay"]:
+                            # 🏁 FINAL CHECKOUT TRANSACTION RUNTIME
+                            await execute_cart_checkout(sender_phone, session_id, db)
+                            
+                    # TRAFFIC ROUTE B: LIST SELECTIONS / INTERACTIVE BUTTONS
                     elif msg_obj.get("type") == "interactive":
                         interactive_obj = msg_obj.get("interactive", {})
                         
+                        # Handle Drop-Down Sub-Menus
                         if interactive_obj.get("type") == "list_reply":
                             chosen_id = interactive_obj.get("list_reply", {}).get("id")
                             
@@ -99,6 +92,7 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                                 add_item_to_database_cart(db, session_id=session_id, sku_id=sku_uuid)
                                 await send_post_item_options(sender_phone, sku_uuid, db)
                                 
+                        # Handle Quick-Reply Actions
                         elif interactive_obj.get("type") == "button_reply":
                             button_id = interactive_obj.get("button_reply", {}).get("id")
                             logger.info(f"🔘 BUTTON CLICK DETECTED: {button_id}")
@@ -106,8 +100,10 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                             if button_id == "btn_browse_more":
                                 await send_interactive_menu(sender_phone)
                             elif button_id == "btn_summary_view":
-                                logger.info(f"📋 Triggering relational summary display for session: {session_id}")
                                 await send_order_summary(sender_phone, session_id, db)
+                            elif button_id == "btn_reset_cart":
+                                clear_active_database_cart(db, session_id=session_id)
+                                await send_whatsapp_text(sender_phone, "🗑️ Your active selections have been cleared. Type *'menu'* to start fresh.")
                             
         return {"status": "processed"}
     except Exception as e:
@@ -139,6 +135,57 @@ def add_item_to_database_cart(db: Session, session_id: str, sku_id: str):
         db.execute(text("INSERT INTO cart_items (id, session_id, sku_id, quantity) VALUES (:id, :session_id, :sku_id, 1)"),
                    {"id": str(uuid.uuid4()), "session_id": session_id, "sku_id": sku_id})
     db.commit()
+
+def clear_active_database_cart(db: Session, session_id: str):
+    """Deletes all item lines associated with this specific workspace session."""
+    delete_query = text("DELETE FROM cart_items WHERE session_id = :session_id")
+    db.execute(delete_query, {"session_id": session_id})
+    db.commit()
+
+async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Session):
+    """Compiles final invoice string card, locks session state, and dispatches terminal receipts."""
+    # 1. Look up items before closing out
+    master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
+    menu_dict = {str(item["sku_id"]): item for item in master_menu}
+    
+    cart_query = text("SELECT sku_id, quantity FROM cart_items WHERE session_id = :session_id")
+    cart_rows = db.execute(cart_query, {"session_id": session_id}).fetchall()
+    
+    if not cart_rows:
+        await send_whatsapp_text(recipient_phone, "🛒 Your cart is currently empty! Type *'menu'* to explore items.")
+        return
+
+    card_lines = ["🏁 *ORDER CONFIRMED & SENT TO KITCHEN!*\n" + "═"*20]
+    subtotal = 0.0
+    
+    for row in cart_rows:
+        sku_str = str(row[0])
+        qty = row[1]
+        if sku_str in menu_dict:
+            item = menu_dict[sku_str]
+            # Formats clearly as e.g., "Golden Special Pizza (Large 13-inch)"[cite: 1]
+            desc = f"{item['name_en']} ({item['portion_size']})"
+            cost = float(item["price"])
+            line_total = qty * cost
+            card_lines.append(f"• *{desc}* x{qty} ➔ *{line_total:.2f} SAR*")
+            subtotal += line_total
+
+    vat_amount = subtotal * 0.15
+    grand_total = subtotal + vat_amount
+    
+    card_lines.append("═"*20)
+    card_lines.append(f"🧾 *Subtotal:* {subtotal:.2f} SAR")
+    card_lines.append(f"💵 *VAT (15%):* {vat_amount:.2f} SAR")
+    card_lines.append(f"💰 *Total Paid:* *{grand_total:.2f} SAR*")
+    card_lines.append("\nThank you for choosing Golden Snacks! Your order is printing inside our kitchen now. If you want to order again instantly, just type *'menu'* to spin up a brand new session card.")
+    
+    # 2. STATE RECOVERY FLIP: Close the active session state flag completely
+    close_query = text("UPDATE whatsapp_sessions SET is_active = false WHERE id = :session_id")
+    db.execute(close_query, {"session_id": session_id})
+    db.commit()
+    
+    # 3. Transmit confirmation downstream to the user phone screen
+    await send_whatsapp_text(recipient_phone, "\n".join(card_lines))
 
 # =====================================================================
 # INTERACTIVE OUTBOUND MESSAGING DISPATCHERS
@@ -179,10 +226,7 @@ async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: 
     filtered_items = [item for item in raw_menu if item["sku_code"].startswith(target_prefix)]
     
     if not filtered_items:
-        text_payload = {
-            "messaging_product": "whatsapp", "to": recipient_phone, "type": "text",
-            "text": {"body": "Our kitchen has run out of items in this category! Please select another option."}
-        }
+        await send_whatsapp_text(recipient_phone, "Our kitchen has run out of items in this category! Please select another option.")
     else:
         rows = []
         for item in filtered_items:
@@ -200,15 +244,15 @@ async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: 
                 "action": {"button": "View Available Items", "sections": [{"title": "Freshly Prepared Today", "rows": rows[:10]}]}
             }
         }
-    url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient() as client:
-        await client.post(url, json=text_payload, headers=headers)
+        url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
+        headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
+        async with httpx.AsyncClient() as client:
+            await client.post(url, json=text_payload, headers=headers)
 
 async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session):
-    item_query = text("SELECT name_en FROM products WHERE id = :sku_id LIMIT 1")
+    item_query = text("SELECT name_en, portion_size FROM products WHERE id = :sku_id LIMIT 1")
     item_row = db.execute(item_query, {"sku_id": sku_id}).fetchone()
-    item_name = item_row[0] if item_row else "Item"
+    item_desc = f"{item_row[0]} ({item_row[1]})" if item_row else "Item"
 
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
     payload = {
@@ -216,11 +260,12 @@ async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session)
         "type": "interactive",
         "interactive": {
             "type": "button",
-            "body": {"text": f"✅ Added *{item_name}* directly to your active order selection card. What would you like to do next?"},
+            "body": {"text": f"✅ Added *{item_desc}* directly to your active cart card. What would you like to do next?"},
             "action": {
                 "buttons": [
                     {"type": "reply", "reply": {"id": "btn_browse_more", "title": "➕ Add More Items"}},
-                    {"type": "reply", "reply": {"id": "btn_summary_view", "title": "📋 View Summary & Pay"}}
+                    {"type": "reply", "reply": {"id": "btn_summary_view", "title": "📋 View Summary"}},
+                    {"type": "reply", "reply": {"id": "btn_reset_cart", "title": "🗑️ Start Over"}}
                 ]
             }
         }
@@ -230,29 +275,26 @@ async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session)
         await client.post(url, json=payload, headers=headers)
 
 async def send_order_summary(recipient_phone: str, session_id: str, db: Session):
-    """Permanently pulls active items and aggregates values directly via verified service abstractions."""
-    # 1. Fetch current quantities selected in the cart for this customer session
     cart_query = text("SELECT sku_id, quantity FROM cart_items WHERE session_id = :session_id")
     cart_rows = db.execute(cart_query, {"session_id": session_id}).fetchall()
     
     if not cart_rows:
         message_text = "🛒 *Your shopping basket is currently empty!* Type *'menu'* to explore our kitchen categories."
     else:
-        # 2. Extract verified live product objects using your robust MenuService channel library
         master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
         menu_dict = {str(item["sku_id"]): item for item in master_menu}
         
         card_lines = ["🛒 *GOLDEN SNACKS ORDER SUMMARY*\n" + "─"*15]
         subtotal = 0.0
         
-        # 3. Match selections to menu schemas in-memory to prevent table schema syntax issues
         for row in cart_rows:
             sku_uuid_str = str(row[0])
             qty = row[1]
             
             if sku_uuid_str in menu_dict:
                 item_data = menu_dict[sku_uuid_str]
-                name = item_data["name_en"]
+                # Inject explicit portions directly into string compilation layers[cite: 1]
+                name = f"{item_data['name_en']} ({item_data['portion_size']})"
                 price = float(item_data["price"])
                 total = qty * price
                 
@@ -268,12 +310,15 @@ async def send_order_summary(recipient_phone: str, session_id: str, db: Session)
             card_lines.append(f"🧾 *Subtotal:* {subtotal:.2f} SAR")
             card_lines.append(f"💵 *VAT (15%):* {vat_amount:.2f} SAR")
             card_lines.append(f"💰 *Grand Total:* *{grand_total:.2f} SAR*")
-            card_lines.append("\nTo finalize this dispatch, type *'checkout'*, or type *'menu'* to add more items.")
+            card_lines.append("\nTo finalize this dispatch, type *'checkout'*, or type *'reset'* to clear all items.")
             message_text = "\n".join(card_lines)
 
+    await send_whatsapp_text(recipient_phone, message_text)
+
+async def send_whatsapp_text(recipient_phone: str, message_body: str):
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
     payload = {
-        "messaging_product": "whatsapp", "to": recipient_phone, "type": "text", "text": {"body": message_text}
+        "messaging_product": "whatsapp", "to": recipient_phone, "type": "text", "text": {"body": message_body}
     }
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient() as client:
