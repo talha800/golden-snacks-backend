@@ -18,7 +18,7 @@ logger = logging.getLogger("GoldenSnacksEngine")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    version="2.2.0",
+    version="2.2.1",
     docs_url="/api/docs" if settings.ENV_MODE == "DEVELOPMENT" else None
 )
 
@@ -55,7 +55,7 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                     if not sender_phone:
                         return {"status": "ignored"}
                         
-                    # Rule 1: Extract or provision only an UNPLACED open cart row context
+                    # Extract or provision only an UNPLACED open cart row context[cite: 1]
                     session_id = ensure_active_cart_session(db, phone_number=sender_phone)
                     
                     # TRAFFIC ROUTE A: INBOUND TEXT COMMAND ENGINE
@@ -69,19 +69,17 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                             await send_order_summary(sender_phone, session_id, db)
                             
                         elif user_text in ["reset", "start over", "clear"]:
-                            # 🔄 RESET TRIGGER ACTION
                             clear_active_database_cart(db, session_id=session_id)
                             await send_whatsapp_text(sender_phone, "🗑️ *Your cart has been completely reset!* Your old selections were deleted. Type *'menu'* to start a completely fresh order card.")
                             
                         elif user_text in ["checkout", "pay"]:
-                            # 🏁 FINAL CHECKOUT TRANSACTION RUNTIME
                             await execute_cart_checkout(sender_phone, session_id, db)
                             
-                    # TRAFFIC ROUTE B: LIST SELECTIONS / INTERACTIVE BUTTONS
+                    # MAPPING TRAFFIC ROUTE B: LIST SELECTIONS / INTERACTIVE BUTTONS
                     elif msg_obj.get("type") == "interactive":
                         interactive_obj = msg_obj.get("interactive", {})
                         
-                        # Handle Drop-Down Sub-Menus
+                        # Handle Drop-Down Sub-Menus[cite: 1]
                         if interactive_obj.get("type") == "list_reply":
                             chosen_id = interactive_obj.get("list_reply", {}).get("id")
                             
@@ -89,10 +87,11 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                                 await send_branch_skus(sender_phone, branch_code="JED_AZIZIYAH", category_id=chosen_id, db=db)
                             elif chosen_id.startswith("sku_"):
                                 sku_uuid = chosen_id.replace("sku_", "")
+                                logger.info(f"💾 STATE TRANSACTION: Writing SKU {sku_uuid} to Session {session_id}")
                                 add_item_to_database_cart(db, session_id=session_id, sku_id=sku_uuid)
                                 await send_post_item_options(sender_phone, sku_uuid, db)
                                 
-                        # Handle Quick-Reply Actions
+                        # Handle Quick-Reply Actions[cite: 1]
                         elif interactive_obj.get("type") == "button_reply":
                             button_id = interactive_obj.get("button_reply", {}).get("id")
                             logger.info(f"🔘 BUTTON CLICK DETECTED: {button_id}")
@@ -137,14 +136,11 @@ def add_item_to_database_cart(db: Session, session_id: str, sku_id: str):
     db.commit()
 
 def clear_active_database_cart(db: Session, session_id: str):
-    """Deletes all item lines associated with this specific workspace session."""
     delete_query = text("DELETE FROM cart_items WHERE session_id = :session_id")
     db.execute(delete_query, {"session_id": session_id})
     db.commit()
 
 async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Session):
-    """Compiles final invoice string card, locks session state, and dispatches terminal receipts."""
-    # 1. Look up items before closing out
     master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
     menu_dict = {str(item["sku_id"]): item for item in master_menu}
     
@@ -163,8 +159,7 @@ async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Sessi
         qty = row[1]
         if sku_str in menu_dict:
             item = menu_dict[sku_str]
-            # Formats clearly as e.g., "Golden Special Pizza (Large 13-inch)"[cite: 1]
-            desc = f"{item['name_en']} ({item['portion_size']})"
+            desc = f"{item['name_en']} ({item['portion_size']})"[cite: 1]
             cost = float(item["price"])
             line_total = qty * cost
             card_lines.append(f"• *{desc}* x{qty} ➔ *{line_total:.2f} SAR*")
@@ -179,12 +174,10 @@ async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Sessi
     card_lines.append(f"💰 *Total Paid:* *{grand_total:.2f} SAR*")
     card_lines.append("\nThank you for choosing Golden Snacks! Your order is printing inside our kitchen now. If you want to order again instantly, just type *'menu'* to spin up a brand new session card.")
     
-    # 2. STATE RECOVERY FLIP: Close the active session state flag completely
     close_query = text("UPDATE whatsapp_sessions SET is_active = false WHERE id = :session_id")
     db.execute(close_query, {"session_id": session_id})
     db.commit()
     
-    # 3. Transmit confirmation downstream to the user phone screen
     await send_whatsapp_text(recipient_phone, "\n".join(card_lines))
 
 # =====================================================================
@@ -244,15 +237,22 @@ async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: 
                 "action": {"button": "View Available Items", "sections": [{"title": "Freshly Prepared Today", "rows": rows[:10]}]}
             }
         }
-        url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
-        async with httpx.AsyncClient() as client:
-            await client.post(url, json=text_payload, headers=headers)
+    url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient() as client:
+        await client.post(url, json=text_payload, headers=headers)
 
 async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session):
-    item_query = text("SELECT name_en, portion_size FROM products WHERE id = :sku_id LIMIT 1")
-    item_row = db.execute(item_query, {"sku_id": sku_id}).fetchone()
-    item_desc = f"{item_row[0]} ({item_row[1]})" if item_row else "Item"
+    """Safely extracts portion details from the master mapping layer to bypass column variance errors."""
+    master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
+    menu_dict = {str(item["sku_id"]): item for item in master_menu}
+    
+    sku_uuid_str = str(sku_id)
+    if sku_uuid_str in menu_dict:
+        item_data = menu_dict[sku_uuid_str]
+        item_desc = f"{item_data['name_en']} ({item_data['portion_size']})"[cite: 1]
+    else:
+        item_desc = "Item"
 
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
     payload = {
@@ -293,8 +293,7 @@ async def send_order_summary(recipient_phone: str, session_id: str, db: Session)
             
             if sku_uuid_str in menu_dict:
                 item_data = menu_dict[sku_uuid_str]
-                # Inject explicit portions directly into string compilation layers[cite: 1]
-                name = f"{item_data['name_en']} ({item_data['portion_size']})"
+                name = f"{item_data['name_en']} ({item_data['portion_size']})"[cite: 1]
                 price = float(item_data["price"])
                 total = qty * price
                 
