@@ -260,11 +260,12 @@ async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session)
 
 
 async def send_order_summary(recipient_phone: str, session_id: str, db: Session):
-    """Calculates active item aggregation rows using clean inner joins on your live schema products."""
+    """Calculates active item aggregation rows using relational joins over products and prices."""
     summary_query = text("""
-        SELECT p.name_en, c.quantity, p.price, (c.quantity * p.price) as line_total
+        SELECT p.name_en, c.quantity, pr.price, (c.quantity * pr.price) as line_total
         FROM cart_items c
         JOIN products p ON c.sku_id = p.id
+        JOIN prices pr ON p.id = pr.sku_id
         WHERE c.session_id = :session_id
     """)
     basket_rows = db.execute(summary_query, {"session_id": session_id}).fetchall()
