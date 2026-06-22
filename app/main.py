@@ -18,7 +18,7 @@ logger = logging.getLogger("GoldenSnacksEngine")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    version="2.1.1",
+    version="2.1.2",
     docs_url="/api/docs" if settings.ENV_MODE == "DEVELOPMENT" else None
 )
 
@@ -74,7 +74,6 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                     if not sender_phone:
                         return {"status": "ignored"}
                         
-                    # Provision session states instantly[cite: 1]
                     session_id = ensure_active_cart_session(db, phone_number=sender_phone)
                     
                     # MAPPING TRAFFIC ROUTE A: INBOUND TEXT TRIGGERS
@@ -90,7 +89,6 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                     elif msg_obj.get("type") == "interactive":
                         interactive_obj = msg_obj.get("interactive", {})
                         
-                        # Handle drop-down selection rows[cite: 1]
                         if interactive_obj.get("type") == "list_reply":
                             chosen_id = interactive_obj.get("list_reply", {}).get("id")
                             
@@ -101,7 +99,6 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                                 add_item_to_database_cart(db, session_id=session_id, sku_id=sku_uuid)
                                 await send_post_item_options(sender_phone, sku_uuid, db)
                                 
-                        # Handle structural quick reply click responses[cite: 1]
                         elif interactive_obj.get("type") == "button_reply":
                             button_id = interactive_obj.get("button_reply", {}).get("id")
                             logger.info(f"🔘 BUTTON CLICK DETECTED: {button_id}")
@@ -144,7 +141,7 @@ def add_item_to_database_cart(db: Session, session_id: str, sku_id: str):
     db.commit()
 
 # =====================================================================
-# INTERACTIVE OUTBOUND MESSAGING PIPELINE & DISPATCHERS
+# INTERACTIVE OUTBOUND MESSAGING DISPATCHERS
 # =====================================================================
 
 async def send_interactive_menu(recipient_phone: str):
@@ -233,35 +230,46 @@ async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session)
         await client.post(url, json=payload, headers=headers)
 
 async def send_order_summary(recipient_phone: str, session_id: str, db: Session):
-    """Calculates active item aggregation rows using relational product snapshots."""
-    summary_query = text("""
-        SELECT p.name_en, c.quantity, p.price, (c.quantity * p.price) as line_total
-        FROM cart_items c
-        JOIN products p ON c.sku_id = p.id
-        WHERE c.session_id = :session_id
-    """)
-    basket_rows = db.execute(summary_query, {"session_id": session_id}).fetchall()
+    """Permanently pulls active items and aggregates values directly via verified service abstractions."""
+    # 1. Fetch current quantities selected in the cart for this customer session
+    cart_query = text("SELECT sku_id, quantity FROM cart_items WHERE session_id = :session_id")
+    cart_rows = db.execute(cart_query, {"session_id": session_id}).fetchall()
     
-    if not basket_rows:
+    if not cart_rows:
         message_text = "🛒 *Your shopping basket is currently empty!* Type *'menu'* to explore our kitchen categories."
     else:
+        # 2. Extract verified live product objects using your robust MenuService channel library
+        master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
+        menu_dict = {str(item["sku_id"]): item for item in master_menu}
+        
         card_lines = ["🛒 *GOLDEN SNACKS ORDER SUMMARY*\n" + "─"*15]
         subtotal = 0.0
         
-        for row in basket_rows:
-            name, qty, price, total = row
-            card_lines.append(f"• *{name}*\n  `{qty} x {price:.2f} SAR` ➔ *{total:.2f} SAR*")
-            subtotal += float(total)
+        # 3. Match selections to menu schemas in-memory to prevent table schema syntax issues
+        for row in cart_rows:
+            sku_uuid_str = str(row[0])
+            qty = row[1]
             
-        vat_amount = subtotal * 0.15
-        grand_total = subtotal + vat_amount
+            if sku_uuid_str in menu_dict:
+                item_data = menu_dict[sku_uuid_str]
+                name = item_data["name_en"]
+                price = float(item_data["price"])
+                total = qty * price
+                
+                card_lines.append(f"• *{name}*\n  `{qty} x {price:.2f} SAR` ➔ *{total:.2f} SAR*")
+                subtotal += total
         
-        card_lines.append("─"*15)
-        card_lines.append(f"🧾 *Subtotal:* {subtotal:.2f} SAR")
-        card_lines.append(f"💵 *VAT (15%):* {vat_amount:.2f} SAR")
-        card_lines.append(f"💰 *Grand Total:* *{grand_total:.2f} SAR*")
-        card_lines.append("\nTo finalize this dispatch, type *'checkout'*, or type *'menu'* to add more items.")
-        message_text = "\n".join(card_lines)
+        if subtotal == 0.0:
+            message_text = "🛒 *Your shopping basket is currently empty!* Type *'menu'* to explore our kitchen categories."
+        else:
+            vat_amount = subtotal * 0.15
+            grand_total = subtotal + vat_amount
+            card_lines.append("─"*15)
+            card_lines.append(f"🧾 *Subtotal:* {subtotal:.2f} SAR")
+            card_lines.append(f"💵 *VAT (15%):* {vat_amount:.2f} SAR")
+            card_lines.append(f"💰 *Grand Total:* *{grand_total:.2f} SAR*")
+            card_lines.append("\nTo finalize this dispatch, type *'checkout'*, or type *'menu'* to add more items.")
+            message_text = "\n".join(card_lines)
 
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
     payload = {
