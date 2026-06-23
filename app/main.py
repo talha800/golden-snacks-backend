@@ -17,7 +17,7 @@ logger = logging.getLogger("GoldenSnacksEngine")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    version="2.5.2",
+    version="2.6.0",
     docs_url="/api/docs" if settings.ENV_MODE == "DEVELOPMENT" else None
 )
 
@@ -142,11 +142,14 @@ def clear_active_database_cart(db: Session, session_id: str):
     db.commit()
 
 async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Session):
-    master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
-    menu_dict = {str(item["sku_id"]): item for item in master_menu}
-    
-    cart_query = text("SELECT sku_id, quantity FROM cart_items WHERE session_id = :session_id")
-    cart_rows = db.execute(cart_query, {"session_id": session_id}).fetchall()
+    """Leverages relational native SQL aggregates directly on your Supabase tables."""
+    checkout_query = text("""
+        SELECT p.name_en, p.portion_size, c.quantity, p.price, (c.quantity * p.price) as line_total
+        FROM cart_items c
+        JOIN products p ON c.sku_id = p.id
+        WHERE c.session_id = :session_id
+    """)
+    cart_rows = db.execute(checkout_query, {"session_id": session_id}).fetchall()
     
     if not cart_rows:
         await send_main_options_menu(recipient_phone, "🛒 Your cart is currently empty!")
@@ -156,17 +159,11 @@ async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Sessi
     total_inclusive = 0.0
     
     for row in cart_rows:
-        sku_str = str(row[0])
-        qty = row[1]
-        if sku_str in menu_dict:
-            item = menu_dict[sku_str]
-            desc = f"{item['name_en']} ({item['portion_size']})"
-            cost = float(item["price"])
-            line_total = qty * cost
-            card_lines.append(f"• *{desc}* x{qty} ➔ *{line_total:.2f} SAR*")
-            total_inclusive += line_total
+        name, portion, qty, price, total = row
+        card_lines.append(f"• *{name} ({portion})* x{qty} ➔ *{total:.2f} SAR*")
+        total_inclusive += float(total)
 
-    # Reverse Tax Algebra Calculations
+    # Reverse VAT Algebra Calculations
     subtotal_exclusive = total_inclusive / 1.15
     vat_amount = total_inclusive - subtotal_exclusive
     
@@ -245,11 +242,11 @@ async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: 
             "header": {"type": "text", "text": "Select Your Order 🍽️"},
             "body": {"text": "Tap below to view available sizes and add choices straight into your cart:"},
             "footer": {"text": "Prices include local VAT requirements"},
-            # 🛡️ FIX: Explicitly slice rows to 10 entries to fulfill Meta schema validation specs safely
             "action": {"button": "View Available Items", "sections": [{"title": "Freshly Prepared Today", "rows": rows[:10]}]}
         }
     }
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
+    # 🧼 HARDENED FIX: Dropped custom app trace header fields to ensure clean native message routing parameters
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient() as client:
         await client.post(url, json=text_payload, headers=headers)
