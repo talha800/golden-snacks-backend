@@ -2,7 +2,6 @@ import logging
 import httpx
 import uuid
 from fastapi import FastAPI, Depends, Query, HTTPException, status, Request, Response
-from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -18,7 +17,7 @@ logger = logging.getLogger("GoldenSnacksEngine")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    version="2.4.0",
+    version="2.5.0",
     docs_url="/api/docs" if settings.ENV_MODE == "DEVELOPMENT" else None
 )
 
@@ -59,7 +58,7 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                     # Central Database Session Provisioning
                     session_id = ensure_active_cart_session(db, phone_number=sender_phone)
                     
-                    # TRAFFIC ROUTE A: INBOUND TEXT COMMAND ENGINE
+                    # TRAFFIC ROUTE A: INBOUND TEXT/BUTTON TEXT COMMAND ENGINE
                     if msg_obj.get("type") == "text":
                         user_text = msg_obj["text"].get("body", "").strip().lower()
                         
@@ -69,7 +68,7 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                             await send_order_summary(sender_phone, session_id, db)
                         elif user_text in ["reset", "start over", "clear"]:
                             clear_active_database_cart(db, session_id=session_id)
-                            await send_whatsapp_text(sender_phone, "🗑️ *Your cart has been completely reset!* Your old selections were deleted. Type *'menu'* to start a completely fresh order card.")
+                            await send_main_options_menu(sender_phone, "🗑️ *Your cart has been completely reset!* Your old selections were deleted.")
                         elif user_text in ["checkout", "pay"]:
                             await execute_cart_checkout(sender_phone, session_id, db)
                             
@@ -100,7 +99,11 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                                 await send_order_summary(sender_phone, session_id, db)
                             elif button_id == "btn_reset_cart":
                                 clear_active_database_cart(db, session_id=session_id)
-                                await send_whatsapp_text(sender_phone, "🗑️ Your active selections have been cleared. Type *'menu'* to start fresh.")
+                                await send_main_options_menu(sender_phone, "🗑️ Your active selections have been cleared.")
+                            elif button_id == "btn_checkout_final":
+                                await execute_cart_checkout(sender_phone, session_id, db)
+                            elif button_id == "btn_main_menu":
+                                await send_interactive_menu(sender_phone)
                             
         return {"status": "processed"}
     except Exception as e:
@@ -146,11 +149,11 @@ async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Sessi
     cart_rows = db.execute(cart_query, {"session_id": session_id}).fetchall()
     
     if not cart_rows:
-        await send_whatsapp_text(recipient_phone, "🛒 Your cart is currently empty! Type *'menu'* to explore items.")
+        await send_main_options_menu(recipient_phone, "🛒 Your cart is currently empty!")
         return
 
     card_lines = ["🏁 *ORDER CONFIRMED & SENT TO KITCHEN!*\n" + "═"*20]
-    subtotal = 0.0
+    total_inclusive = 0.0
     
     for row in cart_rows:
         sku_str = str(row[0])
@@ -161,22 +164,23 @@ async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Sessi
             cost = float(item["price"])
             line_total = qty * cost
             card_lines.append(f"• *{desc}* x{qty} ➔ *{line_total:.2f} SAR*")
-            subtotal += line_total
+            total_inclusive += line_total
 
-    vat_amount = subtotal * 0.15
-    grand_total = subtotal + vat_amount
+    # Reverse Tax Algebra Calculations
+    subtotal_exclusive = total_inclusive / 1.15
+    vat_amount = total_inclusive - subtotal_exclusive
     
     card_lines.append("═"*20)
-    card_lines.append(f"🧾 *Subtotal:* {subtotal:.2f} SAR")
-    card_lines.append(f"💵 *VAT (15%):* {vat_amount:.2f} SAR")
-    card_lines.append(f"💰 *Total Paid:* *{grand_total:.2f} SAR*")
-    card_lines.append("\nThank you for choosing Golden Snacks! Your order is printing inside our kitchen now. Type *'menu'* to start a new order selection card.")
+    card_lines.append(f"🧾 *Price (Excluding VAT):* {subtotal_exclusive:.2f} SAR")
+    card_lines.append(f"💵 *VAT Amount (15%):* {vat_amount:.2f} SAR")
+    card_lines.append(f"💰 *Final Price (Inc. VAT):* *{total_inclusive:.2f} SAR*")
+    card_lines.append("\nThank you! Your order is printing at our terminal. Tap below if you want to start a brand new order sequence.")
     
     close_query = text("UPDATE whatsapp_sessions SET is_active = false WHERE id = :session_id")
     db.execute(close_query, {"session_id": session_id})
     db.commit()
     
-    await send_whatsapp_text(recipient_phone, "\n".join(card_lines))
+    await send_post_checkout_options(recipient_phone, "\n".join(card_lines))
 
 # =====================================================================
 # INTERACTIVE OUTBOUND MESSAGING DISPATCHERS
@@ -199,8 +203,8 @@ async def send_interactive_menu(recipient_phone: str):
                     "rows": [
                         {"id": "cat_biryani", "title": "Biryani Specials", "description": "Authentic chicken & mutton biryani"},
                         {"id": "cat_pizza", "title": "Pizza Options", "description": "Freshly baked pan pizzas"},
-                        {"id": "cat_fastfood", "title": "Fast Food Favorites", "description": "Zinger burgers & club sandwiches"},
-                        {"id": "cat_bbq", "title": "BBQ Rolls", "description": "Chicken boti & beef seekh rolls"}
+                        {"id": "cat_fastfood", "title": "Fast Food & Fries", "description": "Zinger burgers, club sandwiches & crispy fries"},
+                        {"id": "cat_bbq", "title": "BBQ Specials & Rolls", "description": "Chicken boti, tikka, & beef seekh rolls"}
                     ]
                 }]
             }
@@ -212,45 +216,50 @@ async def send_interactive_menu(recipient_phone: str):
 
 async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: str, db: Session):
     raw_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code=branch_code)
-    prefix_map = {"cat_biryani": "RIC", "cat_pizza": "PZ", "cat_fastfood": "BGR", "cat_bbq": "GRV"}
-    target_prefix = prefix_map.get(category_id, "RIC")
-    filtered_items = [item for item in raw_menu if item["sku_code"].startswith(target_prefix)]
+    
+    # Unified mapping strategy to catch database view shortcodes
+    prefix_map = {
+        "cat_biryani": ["RIC"],
+        "cat_pizza": ["PZ"],
+        "cat_fastfood": ["BGR", "FF", "ZNG", "SND"], # Pulls all burgers, zingers, clubs and fries safely
+        "cat_bbq": ["GRV", "BBQ", "ROL", "BOT"]       # Pulls tikka botis, handis, and seekh rolls safely
+    }
+    
+    target_prefixes = prefix_map.get(category_id, ["RIC"])
+    filtered_items = [item for item in raw_menu if any(item["sku_code"].startswith(pref) for pref in target_prefixes)]
     
     if not filtered_items:
-        await send_whatsapp_text(recipient_phone, "Our kitchen has run out of items in this category! Please select another option.")
-    else:
-        rows = []
-        for item in filtered_items:
-            rows.append({
-                "id": f"sku_{item['sku_id']}", "title": f"{item['name_en']}", "description": f"{item['portion_size']} ➔ {item['price']} SAR"
-            })
-        text_payload = {
-            "messaging_product": "whatsapp", "recipient_type": "individual", "to": recipient_phone,
-            "type": "interactive",
-            "interactive": {
-                "type": "list",
-                "header": {"type": "text", "text": "Select Your Order 🍽️"},
-                "body": {"text": "Tap below to view available sizes and add choices straight into your cart:"},
-                "footer": {"text": "Prices include local VAT requirements"},
-                "action": {"button": "View Available Items", "sections": [{"title": "Freshly Prepared Today", "rows": rows[:10]}]}
-            }
+        await send_main_options_menu(recipient_phone, "⚠️ Our kitchen has run out of items in this category for this shift!")
+        return
+
+    rows = []
+    for item in filtered_items:
+        rows.append({
+            "id": f"sku_{item['sku_id']}", "title": f"{item['name_en']}", "description": f"{item['portion_size']} ➔ {item['price']} SAR"
+        })
+        
+    text_payload = {
+        "messaging_product": "whatsapp", "recipient_type": "individual", "to": recipient_phone,
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "header": {"type": "text", "text": "Select Your Order 🍽️"},
+            "body": {"text": "Tap below to view available sizes and add choices straight into your cart:"},
+            "footer": {"text": "Prices include local VAT requirements"},
+            "action": {"button": "View Available Items", "sections": [{"title": "Freshly Prepared Today", "rows": rows[:10]}]}
         }
+    }
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient() as client:
         await client.post(url, json=text_payload, headers=headers)
 
 async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session):
-    """Natively references the verified database schema pipeline mapping layer to prevent table schema errors."""
     master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
     menu_dict = {str(item["sku_id"]): item for item in master_menu}
     
     sku_uuid_str = str(sku_id)
-    if sku_uuid_str in menu_dict:
-        item_data = menu_dict[sku_uuid_str]
-        item_desc = f"{item_data['name_en']} ({item_data['portion_size']})"
-    else:
-        item_desc = "Item"
+    item_desc = f"{menu_dict[sku_uuid_str]['name_en']} ({menu_dict[sku_uuid_str]['portion_size']})" if sku_uuid_str in menu_dict else "Item"
 
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
     payload = {
@@ -258,7 +267,7 @@ async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session)
         "type": "interactive",
         "interactive": {
             "type": "button",
-            "body": {"text": f"✅ Added *{item_desc}* directly to your active cart card. What would you like to do next?"},
+            "body": {"text": f"✅ Added *{item_desc}* directly to your active cart selection card. What would you like to do next?"},
             "action": {
                 "buttons": [
                     {"type": "reply", "reply": {"id": "btn_browse_more", "title": "➕ Add More Items"}},
@@ -277,45 +286,87 @@ async def send_order_summary(recipient_phone: str, session_id: str, db: Session)
     cart_rows = db.execute(cart_query, {"session_id": session_id}).fetchall()
     
     if not cart_rows:
-        message_text = "🛒 *Your shopping basket is currently empty!* Type *'menu'* to explore our kitchen categories."
-    else:
-        master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
-        menu_dict = {str(item["sku_id"]): item for item in master_menu}
+        await send_main_options_menu(recipient_phone, "🛒 Your shopping basket is currently empty!")
+        return
+
+    master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
+    menu_dict = {str(item["sku_id"]): item for item in master_menu}
+    
+    card_lines = ["🛒 *GOLDEN SNACKS ORDER SUMMARY*\n" + "─"*15]
+    total_inclusive = 0.0
+    
+    for row in cart_rows:
+        sku_uuid_str = str(row[0])
+        qty = row[1]
         
-        card_lines = ["🛒 *GOLDEN SNACKS ORDER SUMMARY*\n" + "─"*15]
-        subtotal = 0.0
-        
-        for row in cart_rows:
-            sku_uuid_str = str(row[0])
-            qty = row[1]
+        if sku_uuid_str in menu_dict:
+            item_data = menu_dict[sku_uuid_str]
+            name = f"{item_data['name_en']} ({item_data['portion_size']})"
+            price = float(item_data["price"])
+            total = qty * price
             
-            if sku_uuid_str in menu_dict:
-                item_data = menu_dict[sku_uuid_str]
-                name = f"{item_data['name_en']} ({item_data['portion_size']})"
-                price = float(item_data["price"])
-                total = qty * price
-                
-                card_lines.append(f"• *{name}*\n  `{qty} x {price:.2f} SAR` ➔ *{total:.2f} SAR*")
-                subtotal += total
-        
-        if subtotal == 0.0:
-            message_text = "🛒 *Your shopping basket is currently empty!* Type *'menu'* to explore our kitchen categories."
-        else:
-            vat_amount = subtotal * 0.15
-            grand_total = subtotal + vat_amount
-            card_lines.append("─"*15)
-            card_lines.append(f"🧾 *Subtotal:* {subtotal:.2f} SAR")
-            card_lines.append(f"💵 *VAT (15%):* {vat_amount:.2f} SAR")
-            card_lines.append(f"💰 *Grand Total:* *{grand_total:.2f} SAR*")
-            card_lines.append("\nTo finalize this dispatch, type *'checkout'*, or type *'reset'* to clear all items.")
-            message_text = "\n".join(card_lines)
-
-    await send_whatsapp_text(recipient_phone, message_text)
-
-async def send_whatsapp_text(recipient_phone: str, message_body: str):
+            card_lines.append(f"• *{name}*\n  `{qty} x {price:.2f} SAR` ➔ *{total:.2f} SAR*")
+            total_inclusive += total
+    
+    # Inverse Tax Calculation Matrix
+    subtotal_exclusive = total_inclusive / 1.15
+    vat_amount = total_inclusive - subtotal_exclusive
+    
+    card_lines.append("─"*15)
+    card_lines.append(f"🧾 *Subtotal (Excl. VAT):* {subtotal_exclusive:.2f} SAR")
+    card_lines.append(f"💵 *VAT (15%):* {vat_amount:.2f} SAR")
+    card_lines.append(f"💰 *Grand Total:* *{total_inclusive:.2f} SAR*")
+    
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
     payload = {
-        "messaging_product": "whatsapp", "to": recipient_phone, "type": "text", "text": {"body": message_body}
+        "messaging_product": "whatsapp", "recipient_type": "individual", "to": recipient_phone,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": "\n".join(card_lines)},
+            "action": {
+                "buttons": [
+                    {"type": "reply", "reply": {"id": "btn_checkout_final", "title": "🏁 Complete Order"}},
+                    {"type": "reply", "reply": {"id": "btn_browse_more", "title": "➕ Add More Items"}},
+                    {"type": "reply", "reply": {"id": "btn_reset_cart", "title": "🗑️ Reset Order"}}
+                ]
+            }
+        }
+    }
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient() as client:
+        await client.post(url, json=payload, headers=headers)
+
+async def send_main_options_menu(recipient_phone: str, message_header: str):
+    """Fallback interactive control matrix to eliminate text inputs completely."""
+    url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
+    payload = {
+        "messaging_product": "whatsapp", "recipient_type": "individual", "to": recipient_phone,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": f"{message_header}\n\nPlease click below to access the kitchen catalog:"},
+            "action": {
+                "buttons": [{"type": "reply", "reply": {"id": "btn_main_menu", "title": "🍔 Open Main Menu"}}]
+            }
+        }
+    }
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient() as client:
+        await client.post(url, json=payload, headers=headers)
+
+async def send_post_checkout_options(recipient_phone: str, invoice_body: str):
+    url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
+    payload = {
+        "messaging_product": "whatsapp", "recipient_type": "individual", "to": recipient_phone,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": invoice_body},
+            "action": {
+                "buttons": [{"type": "reply", "reply": {"id": "btn_main_menu", "title": "🔄 Order Again"}}]
+            }
+        }
     }
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient() as client:
