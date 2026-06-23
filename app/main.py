@@ -2,6 +2,7 @@ import logging
 import httpx
 import uuid
 from fastapi import FastAPI, Depends, Query, HTTPException, status, Request, Response
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -17,7 +18,7 @@ logger = logging.getLogger("GoldenSnacksEngine")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    version="2.5.0",
+    version="2.5.1",
     docs_url="/api/docs" if settings.ENV_MODE == "DEVELOPMENT" else None
 )
 
@@ -55,10 +56,10 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                     if not sender_phone:
                         return {"status": "ignored"}
                         
-                    # Central Database Session Provisioning
+                    # Central Database Session Provisioning[cite: 1]
                     session_id = ensure_active_cart_session(db, phone_number=sender_phone)
                     
-                    # TRAFFIC ROUTE A: INBOUND TEXT/BUTTON TEXT COMMAND ENGINE
+                    # TRAFFIC ROUTE A: INBOUND TEXT COMMAND ENGINE
                     if msg_obj.get("type") == "text":
                         user_text = msg_obj["text"].get("body", "").strip().lower()
                         
@@ -76,7 +77,7 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                     elif msg_obj.get("type") == "interactive":
                         interactive_obj = msg_obj.get("interactive", {})
                         
-                        # Handle Drop-Down Sub-Menus
+                        # Handle Drop-Down Sub-Menus[cite: 1]
                         if interactive_obj.get("type") == "list_reply":
                             chosen_id = interactive_obj.get("list_reply", {}).get("id")
                             
@@ -88,7 +89,7 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                                 add_item_to_database_cart(db, session_id=session_id, sku_id=sku_uuid)
                                 await send_post_item_options(sender_phone, sku_uuid, db)
                                 
-                        # Handle Quick-Reply Actions
+                        # Handle Quick-Reply Actions[cite: 1]
                         elif interactive_obj.get("type") == "button_reply":
                             button_id = interactive_obj.get("button_reply", {}).get("id")
                             logger.info(f"🔘 BUTTON CLICK DETECTED: {button_id}")
@@ -142,11 +143,14 @@ def clear_active_database_cart(db: Session, session_id: str):
     db.commit()
 
 async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Session):
-    master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
-    menu_dict = {str(item["sku_id"]): item for item in master_menu}
-    
-    cart_query = text("SELECT sku_id, quantity FROM cart_items WHERE session_id = :session_id")
-    cart_rows = db.execute(cart_query, {"session_id": session_id}).fetchall()
+    """Leverages relational native SQL aggregates directly on your Supabase tables."""
+    checkout_query = text("""
+        SELECT p.name_en, p.portion_size, c.quantity, p.price, (c.quantity * p.price) as line_total
+        FROM cart_items c
+        JOIN products p ON c.sku_id = p.id
+        WHERE c.session_id = :session_id
+    """)
+    cart_rows = db.execute(checkout_query, {"session_id": session_id}).fetchall()
     
     if not cart_rows:
         await send_main_options_menu(recipient_phone, "🛒 Your cart is currently empty!")
@@ -156,17 +160,11 @@ async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Sessi
     total_inclusive = 0.0
     
     for row in cart_rows:
-        sku_str = str(row[0])
-        qty = row[1]
-        if sku_str in menu_dict:
-            item = menu_dict[sku_str]
-            desc = f"{item['name_en']} ({item['portion_size']})"
-            cost = float(item["price"])
-            line_total = qty * cost
-            card_lines.append(f"• *{desc}* x{qty} ➔ *{line_total:.2f} SAR*")
-            total_inclusive += line_total
+        name, portion, qty, price, total = row
+        card_lines.append(f"• *{name} ({portion})* x{qty} ➔ *{total:.2f} SAR*")
+        total_inclusive += float(total)
 
-    # Reverse Tax Algebra Calculations
+    # Reverse VAT Algebra Calculations
     subtotal_exclusive = total_inclusive / 1.15
     vat_amount = total_inclusive - subtotal_exclusive
     
@@ -217,12 +215,11 @@ async def send_interactive_menu(recipient_phone: str):
 async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: str, db: Session):
     raw_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code=branch_code)
     
-    # Unified mapping strategy to catch database view shortcodes
     prefix_map = {
         "cat_biryani": ["RIC"],
         "cat_pizza": ["PZ"],
-        "cat_fastfood": ["BGR", "FF", "ZNG", "SND"], # Pulls all burgers, zingers, clubs and fries safely
-        "cat_bbq": ["GRV", "BBQ", "ROL", "BOT"]       # Pulls tikka botis, handis, and seekh rolls safely
+        "cat_fastfood": ["BGR", "FF", "ZNG", "SND"], 
+        "cat_bbq": ["GRV", "BBQ", "ROL", "BOT"]       
     }
     
     target_prefixes = prefix_map.get(category_id, ["RIC"])
@@ -246,6 +243,7 @@ async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: 
             "header": {"type": "text", "text": "Select Your Order 🍽️"},
             "body": {"text": "Tap below to view available sizes and add choices straight into your cart:"},
             "footer": {"text": "Prices include local VAT requirements"},
+            # 🛡️ FIX: Hard slice array to 10 entries to guarantee Meta API acceptance rules
             "action": {"button": "View Available Items", "sections": [{"title": "Freshly Prepared Today", "rows": rows[:10]}]}
         }
     }
@@ -308,7 +306,7 @@ async def send_order_summary(recipient_phone: str, session_id: str, db: Session)
             card_lines.append(f"• *{name}*\n  `{qty} x {price:.2f} SAR` ➔ *{total:.2f} SAR*")
             total_inclusive += total
     
-    # Inverse Tax Calculation Matrix
+    # Reverse Tax Calculation Matrix
     subtotal_exclusive = total_inclusive / 1.15
     vat_amount = total_inclusive - subtotal_exclusive
     
@@ -338,7 +336,6 @@ async def send_order_summary(recipient_phone: str, session_id: str, db: Session)
         await client.post(url, json=payload, headers=headers)
 
 async def send_main_options_menu(recipient_phone: str, message_header: str):
-    """Fallback interactive control matrix to eliminate text inputs completely."""
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
     payload = {
         "messaging_product": "whatsapp", "recipient_type": "individual", "to": recipient_phone,
