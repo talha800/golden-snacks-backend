@@ -17,7 +17,7 @@ logger = logging.getLogger("GoldenSnacksEngine")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    version="2.6.0",
+    version="2.6.1",
     docs_url="/api/docs" if settings.ENV_MODE == "DEVELOPMENT" else None
 )
 
@@ -55,7 +55,6 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                     if not sender_phone:
                         return {"status": "ignored"}
                         
-                    # Central Database Session Provisioning
                     session_id = ensure_active_cart_session(db, phone_number=sender_phone)
                     
                     # TRAFFIC ROUTE A: INBOUND TEXT COMMAND ENGINE
@@ -76,7 +75,6 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                     elif msg_obj.get("type") == "interactive":
                         interactive_obj = msg_obj.get("interactive", {})
                         
-                        # Handle Drop-Down Sub-Menus
                         if interactive_obj.get("type") == "list_reply":
                             chosen_id = interactive_obj.get("list_reply", {}).get("id")
                             
@@ -88,7 +86,6 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                                 add_item_to_database_cart(db, session_id=session_id, sku_id=sku_uuid)
                                 await send_post_item_options(sender_phone, sku_uuid, db)
                                 
-                        # Handle Quick-Reply Actions
                         elif interactive_obj.get("type") == "button_reply":
                             button_id = interactive_obj.get("button_reply", {}).get("id")
                             logger.info(f"🔘 BUTTON CLICK DETECTED: {button_id}")
@@ -142,14 +139,11 @@ def clear_active_database_cart(db: Session, session_id: str):
     db.commit()
 
 async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Session):
-    """Leverages relational native SQL aggregates directly on your Supabase tables."""
-    checkout_query = text("""
-        SELECT p.name_en, p.portion_size, c.quantity, p.price, (c.quantity * p.price) as line_total
-        FROM cart_items c
-        JOIN products p ON c.sku_id = p.id
-        WHERE c.session_id = :session_id
-    """)
-    cart_rows = db.execute(checkout_query, {"session_id": session_id}).fetchall()
+    master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
+    menu_dict = {str(item["sku_id"]): item for item in master_menu}
+    
+    cart_query = text("SELECT sku_id, quantity FROM cart_items WHERE session_id = :session_id")
+    cart_rows = db.execute(cart_query, {"session_id": session_id}).fetchall()
     
     if not cart_rows:
         await send_main_options_menu(recipient_phone, "🛒 Your cart is currently empty!")
@@ -159,11 +153,16 @@ async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Sessi
     total_inclusive = 0.0
     
     for row in cart_rows:
-        name, portion, qty, price, total = row
-        card_lines.append(f"• *{name} ({portion})* x{qty} ➔ *{total:.2f} SAR*")
-        total_inclusive += float(total)
+        sku_str = str(row[0])
+        qty = row[1]
+        if sku_str in menu_dict:
+            item = menu_dict[sku_str]
+            desc = f"{item['name_en']} ({item['portion_size']})"
+            cost = float(item["price"])
+            line_total = qty * cost
+            card_lines.append(f"• *{desc}* x{qty} ➔ *{line_total:.2f} SAR*")
+            total_inclusive += line_total
 
-    # Reverse VAT Algebra Calculations
     subtotal_exclusive = total_inclusive / 1.15
     vat_amount = total_inclusive - subtotal_exclusive
     
@@ -245,8 +244,8 @@ async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: 
             "action": {"button": "View Available Items", "sections": [{"title": "Freshly Prepared Today", "rows": rows[:10]}]}
         }
     }
+    # 🎯 RESOLVED: Fully re-interpolated the correct f"{PHONE_NUMBER_ID}" variable template onto the URL string endpoint path
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
-    # 🧼 HARDENED FIX: Dropped custom app trace header fields to ensure clean native message routing parameters
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient() as client:
         await client.post(url, json=text_payload, headers=headers)
@@ -305,7 +304,6 @@ async def send_order_summary(recipient_phone: str, session_id: str, db: Session)
             card_lines.append(f"• *{name}*\n  `{qty} x {price:.2f} SAR` ➔ *{total:.2f} SAR*")
             total_inclusive += total
     
-    # Reverse Tax Calculation Matrix
     subtotal_exclusive = total_inclusive / 1.15
     vat_amount = total_inclusive - subtotal_exclusive
     
