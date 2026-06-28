@@ -7,7 +7,6 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.database import get_db
-from app.services.menu_service import MenuService
 
 # =====================================================================
 # SYSTEM CORE LOGGING & INITIALIZATION
@@ -17,7 +16,7 @@ logger = logging.getLogger("GoldenSnacksEngine")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    version="2.6.1",
+    version="2.7.0",
     docs_url="/api/docs" if settings.ENV_MODE == "DEVELOPMENT" else None
 )
 
@@ -55,9 +54,10 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                     if not sender_phone:
                         return {"status": "ignored"}
                         
+                    # Central Database Session Provisioning
                     session_id = ensure_active_cart_session(db, phone_number=sender_phone)
                     
-                    # TRAFFIC ROUTE A: INBOUND TEXT COMMAND ENGINE
+                    # TRAFFIC ROUTE A: INBOUND TEXT COMMAND ENGINE (FALLBACK)
                     if msg_obj.get("type") == "text":
                         user_text = msg_obj["text"].get("body", "").strip().lower()
                         
@@ -75,6 +75,7 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                     elif msg_obj.get("type") == "interactive":
                         interactive_obj = msg_obj.get("interactive", {})
                         
+                        # Handle Drop-Down Sub-Menus
                         if interactive_obj.get("type") == "list_reply":
                             chosen_id = interactive_obj.get("list_reply", {}).get("id")
                             
@@ -86,6 +87,7 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                                 add_item_to_database_cart(db, session_id=session_id, sku_id=sku_uuid)
                                 await send_post_item_options(sender_phone, sku_uuid, db)
                                 
+                        # Handle Quick-Reply Actions
                         elif interactive_obj.get("type") == "button_reply":
                             button_id = interactive_obj.get("button_reply", {}).get("id")
                             logger.info(f"🔘 BUTTON CLICK DETECTED: {button_id}")
@@ -108,7 +110,7 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
         return {"status": "error"}
 
 # =====================================================================
-# PERSISTENT DATABASE SESSION STATE ENGINES (SUPABASE TRANS-POOL)
+# PERSISTENT DATABASE SESSION STATE ENGINES (SUPABASE NATIVE EXECUTION)
 # =====================================================================
 
 def ensure_active_cart_session(db: Session, phone_number: str) -> str:
@@ -139,11 +141,16 @@ def clear_active_database_cart(db: Session, session_id: str):
     db.commit()
 
 async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Session):
-    master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
-    menu_dict = {str(item["sku_id"]): item for item in master_menu}
-    
-    cart_query = text("SELECT sku_id, quantity FROM cart_items WHERE session_id = :session_id")
-    cart_rows = db.execute(cart_query, {"session_id": session_id}).fetchall()
+    """Leverages relational native SQL aggregates directly on your precise column definitions."""
+    checkout_query = text("""
+        SELECT p.name_en, s.portion_size_en, c.quantity, sp.price, (c.quantity * sp.price) as line_total
+        FROM cart_items c
+        JOIN skus s ON c.sku_id = s.id
+        JOIN products p ON s.product_id = p.id
+        JOIN sku_prices sp ON s.id = sp.sku_id
+        WHERE c.session_id = :session_id AND sp.channel = 'WHATSAPP'
+    """)
+    cart_rows = db.execute(checkout_query, {"session_id": session_id}).fetchall()
     
     if not cart_rows:
         await send_main_options_menu(recipient_phone, "🛒 Your cart is currently empty!")
@@ -153,16 +160,11 @@ async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Sessi
     total_inclusive = 0.0
     
     for row in cart_rows:
-        sku_str = str(row[0])
-        qty = row[1]
-        if sku_str in menu_dict:
-            item = menu_dict[sku_str]
-            desc = f"{item['name_en']} ({item['portion_size']})"
-            cost = float(item["price"])
-            line_total = qty * cost
-            card_lines.append(f"• *{desc}* x{qty} ➔ *{line_total:.2f} SAR*")
-            total_inclusive += line_total
+        name, portion, qty, price, total = row
+        card_lines.append(f"• *{name} ({portion})* x{qty} ➔ *{total:.2f} SAR*")
+        total_inclusive += float(total)
 
+    # Reverse VAT Algebra Calculations
     subtotal_exclusive = total_inclusive / 1.15
     vat_amount = total_inclusive - subtotal_exclusive
     
@@ -211,17 +213,28 @@ async def send_interactive_menu(recipient_phone: str):
         await client.post(url, json=payload, headers=headers)
 
 async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: str, db: Session):
-    raw_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code=branch_code)
-    
-    prefix_map = {
-        "cat_biryani": ["RIC"],
-        "cat_pizza": ["PZ"],
-        "cat_fastfood": ["BGR", "FF", "ZNG", "SND"], 
-        "cat_bbq": ["GRV", "BBQ", "ROL", "BOT"]       
-    }
-    
-    target_prefixes = prefix_map.get(category_id, ["RIC"])
-    filtered_items = [item for item in raw_menu if any(item["sku_code"].startswith(pref) for pref in target_prefixes)]
+    """Executes a database-first lookup using clean sub-table string wildcard criteria hooks."""
+    if category_id == "cat_biryani":
+        sku_filter = "s.sku_code LIKE 'RIC%'"
+    elif category_id == "cat_pizza":
+        sku_filter = "s.sku_code LIKE 'PZ%'"
+    elif category_id == "cat_fastfood":
+        sku_filter = "(s.sku_code LIKE 'BGR%' OR s.sku_code LIKE 'FF%' OR s.sku_code LIKE 'ZNG%' OR s.sku_code LIKE 'SND%')"
+    elif category_id == "cat_bbq":
+        sku_filter = "(s.sku_code LIKE 'GRV%' OR s.sku_code LIKE 'BBQ%' OR s.sku_code LIKE 'ROL%' OR s.sku_code LIKE 'BOT%')"
+    else:
+        sku_filter = "s.sku_code LIKE 'RIC%'"
+
+    # 🛡️ HARDENED DATABASE LEVEL COMPLIANCE: Offloads string truncation (LEFT) and row count management (LIMIT 10) natively to Postgres
+    raw_query = text(f"""
+        SELECT DISTINCT s.id, LEFT(p.name_en, 24) as name_en, s.portion_size_en, sp.price
+        FROM skus s
+        JOIN products p ON s.product_id = p.id
+        JOIN sku_prices sp ON s.id = sp.sku_id
+        WHERE {sku_filter} AND s.is_active = true AND p.is_active = true AND sp.channel = 'WHATSAPP'
+        LIMIT 10
+    """)
+    filtered_items = db.execute(raw_query).fetchall()
     
     if not filtered_items:
         await send_main_options_menu(recipient_phone, "⚠️ Our kitchen has run out of items in this category for this shift!")
@@ -230,7 +243,9 @@ async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: 
     rows = []
     for item in filtered_items:
         rows.append({
-            "id": f"sku_{item['sku_id']}", "title": f"{item['name_en']}", "description": f"{item['portion_size']} ➔ {item['price']} SAR"
+            "id": f"sku_{item[0]}", 
+            "title": f"{item[1]}", 
+            "description": f"{item[2]} ➔ {item[3]} SAR"
         })
         
     text_payload = {
@@ -241,21 +256,24 @@ async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: 
             "header": {"type": "text", "text": "Select Your Order 🍽️"},
             "body": {"text": "Tap below to view available sizes and add choices straight into your cart:"},
             "footer": {"text": "Prices include local VAT requirements"},
-            "action": {"button": "View Available Items", "sections": [{"title": "Freshly Prepared Today", "rows": rows[:10]}]}
+            "action": {"button": "View Available Items", "sections": [{"title": "Freshly Prepared Today", "rows": rows}]}
         }
     }
-    # 🎯 RESOLVED: Fully re-interpolated the correct f"{PHONE_NUMBER_ID}" variable template onto the URL string endpoint path
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient() as client:
         await client.post(url, json=text_payload, headers=headers)
 
 async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session):
-    master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
-    menu_dict = {str(item["sku_id"]): item for item in master_menu}
-    
-    sku_uuid_str = str(sku_id)
-    item_desc = f"{menu_dict[sku_uuid_str]['name_en']} ({menu_dict[sku_uuid_str]['portion_size']})" if sku_uuid_str in menu_dict else "Item"
+    """Uses proper database mapping links to pull real variant items description states."""
+    item_query = text("""
+        SELECT p.name_en, s.portion_size_en 
+        FROM skus s
+        JOIN products p ON s.product_id = p.id
+        WHERE s.id = :sku_id LIMIT 1
+    """)
+    item_row = db.execute(item_query, {"sku_id": sku_id}).fetchone()
+    item_desc = f"{item_row[0]} ({item_row[1]})" if item_row else "Item"
 
     url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
     payload = {
@@ -263,7 +281,7 @@ async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session)
         "type": "interactive",
         "interactive": {
             "type": "button",
-            "body": {"text": f"✅ Added *{item_desc}* directly to your active cart selection card. What would you like to do next?"},
+            "body": {"text": f"✅ Added *{item_desc}* directly to your active cart card. What would you like to do next?"},
             "action": {
                 "buttons": [
                     {"type": "reply", "reply": {"id": "btn_browse_more", "title": "➕ Add More Items"}},
@@ -278,32 +296,30 @@ async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session)
         await client.post(url, json=payload, headers=headers)
 
 async def send_order_summary(recipient_phone: str, session_id: str, db: Session):
-    cart_query = text("SELECT sku_id, quantity FROM cart_items WHERE session_id = :session_id")
-    cart_rows = db.execute(cart_query, {"session_id": session_id}).fetchall()
+    """Pulls aggregated item states natively directly from the unified database schema public pools."""
+    summary_query = text("""
+        SELECT p.name_en, s.portion_size_en, c.quantity, sp.price, (c.quantity * sp.price) as line_total
+        FROM cart_items c
+        JOIN skus s ON c.sku_id = s.id
+        JOIN products p ON s.product_id = p.id
+        JOIN sku_prices sp ON s.id = sp.sku_id
+        WHERE c.session_id = :session_id AND sp.channel = 'WHATSAPP'
+    """)
+    basket_rows = db.execute(summary_query, {"session_id": session_id}).fetchall()
     
-    if not cart_rows:
+    if not basket_rows:
         await send_main_options_menu(recipient_phone, "🛒 Your shopping basket is currently empty!")
         return
 
-    master_menu = MenuService.get_live_menu_for_whatsapp(db, branch_code="JED_AZIZIYAH")
-    menu_dict = {str(item["sku_id"]): item for item in master_menu}
-    
     card_lines = ["🛒 *GOLDEN SNACKS ORDER SUMMARY*\n" + "─"*15]
     total_inclusive = 0.0
     
-    for row in cart_rows:
-        sku_uuid_str = str(row[0])
-        qty = row[1]
-        
-        if sku_uuid_str in menu_dict:
-            item_data = menu_dict[sku_uuid_str]
-            name = f"{item_data['name_en']} ({item_data['portion_size']})"
-            price = float(item_data["price"])
-            total = qty * price
-            
-            card_lines.append(f"• *{name}*\n  `{qty} x {price:.2f} SAR` ➔ *{total:.2f} SAR*")
-            total_inclusive += total
+    for row in basket_rows:
+        name, portion, qty, price, total = row
+        card_lines.append(f"• *{name} ({portion})*\n  `{qty} x {price:.2f} SAR` ➔ *{total:.2f} SAR*")
+        total_inclusive += float(total)
     
+    # Reverse Tax Calculation Matrix
     subtotal_exclusive = total_inclusive / 1.15
     vat_amount = total_inclusive - subtotal_exclusive
     
