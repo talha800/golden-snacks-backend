@@ -16,20 +16,12 @@ logger = logging.getLogger("GoldenSnacksEngine")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    version="2.7.0",
+    version="2.7.1",
     docs_url="/api/docs" if settings.ENV_MODE == "DEVELOPMENT" else None
 )
 
 ACCESS_TOKEN = settings.WHATSAPP_ACCESS_TOKEN
 PHONE_NUMBER_ID = settings.WHATSAPP_PHONE_NUMBER_ID
-
-# =====================================================================
-# SYSTEM HEALTH PROBES
-# =====================================================================
-
-@app.get("/", status_code=status.HTTP_200_OK)
-async def root_check():
-    return {"status": "active", "message": "Golden Snacks Production Engine is online!"}
 
 # =====================================================================
 # META WHATSAPP WEBHOOK ROUTING GATEWAY (STATEFUL ROUTER)
@@ -57,7 +49,7 @@ async def handle_whatsapp_traffic(request: Request, db: Session = Depends(get_db
                     # Central Database Session Provisioning
                     session_id = ensure_active_cart_session(db, phone_number=sender_phone)
                     
-                    # TRAFFIC ROUTE A: INBOUND TEXT COMMAND ENGINE (FALLBACK)
+                    # TRAFFIC ROUTE A: INBOUND TEXT COMMAND ENGINE
                     if msg_obj.get("type") == "text":
                         user_text = msg_obj["text"].get("body", "").strip().lower()
                         
@@ -141,7 +133,6 @@ def clear_active_database_cart(db: Session, session_id: str):
     db.commit()
 
 async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Session):
-    """Leverages relational native SQL aggregates directly on your precise column definitions."""
     checkout_query = text("""
         SELECT p.name_en, s.portion_size_en, c.quantity, sp.price, (c.quantity * sp.price) as line_total
         FROM cart_items c
@@ -164,7 +155,6 @@ async def execute_cart_checkout(recipient_phone: str, session_id: str, db: Sessi
         card_lines.append(f"• *{name} ({portion})* x{qty} ➔ *{total:.2f} SAR*")
         total_inclusive += float(total)
 
-    # Reverse VAT Algebra Calculations
     subtotal_exclusive = total_inclusive / 1.15
     vat_amount = total_inclusive - subtotal_exclusive
     
@@ -213,7 +203,7 @@ async def send_interactive_menu(recipient_phone: str):
         await client.post(url, json=payload, headers=headers)
 
 async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: str, db: Session):
-    """Executes a database-first lookup using clean sub-table string wildcard criteria hooks."""
+    """Executes a clean database lookup, natively capping row returns to prevent payload dropping."""
     if category_id == "cat_biryani":
         sku_filter = "s.sku_code LIKE 'RIC%'"
     elif category_id == "cat_pizza":
@@ -225,14 +215,15 @@ async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: 
     else:
         sku_filter = "s.sku_code LIKE 'RIC%'"
 
-    # 🛡️ HARDENED DATABASE LEVEL COMPLIANCE: Offloads string truncation (LEFT) and row count management (LIMIT 10) natively to Postgres
+    # 🔬 TEST Safeguard: Implements an explicit database clamping rule (LIMIT 8) to verify array scaling limits
     raw_query = text(f"""
         SELECT DISTINCT s.id, LEFT(p.name_en, 24) as name_en, s.portion_size_en, sp.price
         FROM skus s
         JOIN products p ON s.product_id = p.id
         JOIN sku_prices sp ON s.id = sp.sku_id
         WHERE {sku_filter} AND s.is_active = true AND p.is_active = true AND sp.channel = 'WHATSAPP'
-        LIMIT 10
+        ORDER BY name_en
+        LIMIT 8
     """)
     filtered_items = db.execute(raw_query).fetchall()
     
@@ -265,7 +256,6 @@ async def send_branch_skus(recipient_phone: str, branch_code: str, category_id: 
         await client.post(url, json=text_payload, headers=headers)
 
 async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session):
-    """Uses proper database mapping links to pull real variant items description states."""
     item_query = text("""
         SELECT p.name_en, s.portion_size_en 
         FROM skus s
@@ -281,7 +271,7 @@ async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session)
         "type": "interactive",
         "interactive": {
             "type": "button",
-            "body": {"text": f"✅ Added *{item_desc}* directly to your active cart card. What would you like to do next?"},
+            "body": {"text": f"✅ Added *{item_desc}* directly to your active cart selection card. What would you like to do next?"},
             "action": {
                 "buttons": [
                     {"type": "reply", "reply": {"id": "btn_browse_more", "title": "➕ Add More Items"}},
@@ -296,7 +286,13 @@ async def send_post_item_options(recipient_phone: str, sku_id: str, db: Session)
         await client.post(url, json=payload, headers=headers)
 
 async def send_order_summary(recipient_phone: str, session_id: str, db: Session):
-    """Pulls aggregated item states natively directly from the unified database schema public pools."""
+    cart_query = text("SELECT sku_id, quantity FROM cart_items WHERE session_id = :session_id")
+    cart_rows = db.execute(cart_query, {"session_id": session_id}).fetchall()
+    
+    if not cart_rows:
+        await send_main_options_menu(recipient_phone, "🛒 Your shopping basket is currently empty!")
+        return
+
     summary_query = text("""
         SELECT p.name_en, s.portion_size_en, c.quantity, sp.price, (c.quantity * sp.price) as line_total
         FROM cart_items c
@@ -307,10 +303,6 @@ async def send_order_summary(recipient_phone: str, session_id: str, db: Session)
     """)
     basket_rows = db.execute(summary_query, {"session_id": session_id}).fetchall()
     
-    if not basket_rows:
-        await send_main_options_menu(recipient_phone, "🛒 Your shopping basket is currently empty!")
-        return
-
     card_lines = ["🛒 *GOLDEN SNACKS ORDER SUMMARY*\n" + "─"*15]
     total_inclusive = 0.0
     
@@ -319,7 +311,6 @@ async def send_order_summary(recipient_phone: str, session_id: str, db: Session)
         card_lines.append(f"• *{name} ({portion})*\n  `{qty} x {price:.2f} SAR` ➔ *{total:.2f} SAR*")
         total_inclusive += float(total)
     
-    # Reverse Tax Calculation Matrix
     subtotal_exclusive = total_inclusive / 1.15
     vat_amount = total_inclusive - subtotal_exclusive
     
